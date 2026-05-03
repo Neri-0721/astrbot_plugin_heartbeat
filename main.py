@@ -521,15 +521,19 @@ class HeartbeatPlugin(Star):
     @filter.command("heartbeat_show")
     async def cmd_show(self, event: AstrMessageEvent):
         umo = event.unified_msg_origin
+        platform = _extract_platform(umo)
+        if not self._hb_override:
+            await self._ensure_per_platform_hb(platform)
         path = self._hb_path_for_umo(umo)
         try:
             with open(path, encoding="utf-8") as f:
                 yield event.plain_result(
-                    f"📋 HEARTBEAT.md [{_extract_platform(umo)}]:\n\n{f.read()}"
+                    "HEARTBEAT.md [" + platform + "]:
+
+" + f.read()
                 )
         except Exception as e:
-            yield event.plain_result(f"❌ {e}")
-
+            yield event.plain_result("error: " + str(e))
     @filter.command("heartbeat")
     async def cmd_help(self, event: AstrMessageEvent):
         yield event.plain_result(
