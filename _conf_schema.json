@@ -1,69 +1,66 @@
 {
   "interval_minutes": {
-    "title": "心跳间隔",
-    "description": "检查间隔（分钟）。注意：条件不满足时自动跳过，此间隔不代表实际唤醒间隔",
+    "title": "心跳预检间隔",
+    "description": "每隔多少分钟检查一次条件。条件不满足时自动跳过，不消耗 token",
     "type": "int",
     "default": 90,
     "minimum": 10,
     "maximum": 1440
   },
+  "target_mode": {
+    "title": "目标模式",
+    "description": "all = 遍历所有会话，符合条件的触发; last = 只对最后聊天的会话生效",
+    "type": "string",
+    "options": ["all", "last"],
+    "default": "all"
+  },
   "active_hours_start": {
     "title": "活跃时段（开始）",
-    "description": "心跳仅在此时间段内执行。超出则预检跳过，零消耗",
     "type": "string",
     "default": "08:00",
     "hint": "HH:MM 格式"
   },
   "active_hours_end": {
     "title": "活跃时段（结束）",
-    "description": "心跳仅在此时间段内执行",
     "type": "string",
     "default": "23:30",
     "hint": "HH:MM 格式"
   },
   "check_last_interaction": {
     "title": "检测互动间隔",
-    "description": "启用后，若近期已有对话则预检阶段跳过，不消耗 token",
+    "description": "启用后若近期有对话则跳过，免打扰",
     "type": "bool",
     "default": true
   },
   "interaction_threshold_minutes": {
     "title": "互动静默阈值",
-    "description": "距上次对话不足此分钟数时，认为「近期已聊过」，跳过",
+    "description": "距上次对话不足此分钟数时跳过",
     "type": "int",
     "default": 30,
     "minimum": 5,
     "maximum": 1440
   },
-  "night_mode_hour": {
-    "title": "夜间模式小时",
-    "description": "到达此小时后 HEARTBEAT.md 中的夜间规则将触发",
-    "type": "int",
-    "default": 22,
-    "minimum": 18,
-    "maximum": 23
-  },
   "max_daily_heartbeats": {
-    "title": "每日心跳上限",
-    "description": "每日最大触发次数（包括被预检拦截的计数？不，仅算实际唤醒的次数）。用于控制 API 费用",
+    "title": "每日唤醒上限",
+    "description": "每天最多唤醒 Agent 的次数，控制 API 费用",
     "type": "int",
     "default": 48,
     "minimum": 1,
     "maximum": 288
   },
   "cooldown_seconds": {
-    "title": "冷却间隔",
-    "description": "两次心跳之间的最小间隔（秒）。防止短时间内多次触发",
+    "title": "冷却间隔（秒）",
+    "description": "两次唤醒之间的最小间隔",
     "type": "int",
     "default": 120,
     "minimum": 10,
     "maximum": 3600
   },
   "heartbeat_file_path": {
-    "title": "HEARTBEAT.md 路径",
-    "description": "自定义心跳任务文件的路径。留空则使用插件数据目录下的默认文件",
+    "title": "HEARTBEAT.md 路径（可选）",
+    "description": "设置后所有会话共用此文件。留空则启用 per-session 模式",
     "type": "string",
     "default": "",
-    "hint": "留空=默认，或填写绝对路径"
+    "hint": "留空=per-session模式"
   }
 }

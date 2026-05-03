@@ -165,12 +165,8 @@ class HeartbeatPlugin(Star):
         os.makedirs(self.data_dir, exist_ok=True)
         # 默认全局 HEARTBEAT.md
         self._ensure_hb(self.data_dir / "HEARTBEAT.md", _DEFAULT_HB)
-        # per-platform 目录
-        hbd = self.data_dir / "heartbeat.d"
-        os.makedirs(hbd, exist_ok=True)
-        self._ensure_hb(hbd / "qq_official.md", _DEFAULT_HB_QQ)
-        self._ensure_hb(hbd / "lark.md", _DEFAULT_HB_WECHAT)
-        self._ensure_hb(hbd / "wechat.md", _DEFAULT_HB_WECHAT)
+        # per-platform 目录（空目录，后续由 _ensure_per_platform_hb 动态创建）
+        os.makedirs(self.data_dir / "heartbeat.d", exist_ok=True)
 
     @staticmethod
     def _ensure_hb(path, content):
@@ -208,6 +204,33 @@ class HeartbeatPlugin(Star):
         platform = _extract_platform(umo)
         pp = self.data_dir / "heartbeat.d" / f"{platform}.md"
         return str(pp if pp.exists() else self.data_dir / "HEARTBEAT.md")
+
+    async def _ensure_per_platform_hb(self, platform: str):
+        """如 per-platform HEARTBEAT.md 不存在则自动创建"""
+        pp = self.data_dir / "heartbeat.d" / f"{platform}.md"
+        if pp.exists():
+            return
+        content = (
+            f"# HEARTBEAT.md ({platform})\n\n"
+            f"你是被定时任务唤醒的，不是用户主动找你。\n\n"
+            f"## 规则\n"
+            f"- [12:00-13:00] 提醒吃午饭\n"
+            f"- [18:00-19:00] 问候晚饭\n"
+            f"- [22:00之后] 提醒休息\n"
+            f"- 距上次对话 > 4h → 一句自然问候\n"
+            f"- 距上次对话 < 30min → 不要打扰\n\n"
+            f"## 约束\n"
+            f"- 不要解释'被定时唤醒'\n"
+            f"- 不超过 25 字\n"
+            f"- 没事做就安静结束\n"
+        )
+        try:
+            os.makedirs(self.data_dir / "heartbeat.d", exist_ok=True)
+            with open(pp, "w", encoding="utf-8") as f:
+                f.write(content)
+            logger.info(f"[heartbeat] auto-created per-platform HEARTBEAT.md: {pp}")
+        except Exception as e:
+            logger.warning(f"[heartbeat] failed to create per-platform HEARTBEAT.md: {e}")
 
     # ── 调度 ──────────────────────────────────────────────
 
@@ -349,6 +372,8 @@ class HeartbeatPlugin(Star):
         if umo not in self._sessions:
             self._sessions[umo] = {}
             logger.info(f"[heartbeat] +session {platform} | {umo[:40]}")
+            # 新会话：自动创建 per-platform HEARTBEAT.md（如不存在）
+            asyncio.create_task(self._ensure_per_platform_hb(platform))
 
         self._sessions[umo].update(
             {
