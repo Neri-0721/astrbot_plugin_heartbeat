@@ -199,7 +199,7 @@ class HeartbeatPlugin(Star):
             if per_platform.exists():
                 path = str(per_platform)
             else:
-                path = str(self.data_dir / "HEARTBEAT.md")
+                path = str(self.data_dir / "HEARTBEAT.md")  # 本次先 fallback
 
         try:
             with open(path, encoding="utf-8") as f:
@@ -343,6 +343,9 @@ class HeartbeatPlugin(Star):
         if not cm:
             return
         platform = sess.get("platform", _extract_platform(umo))
+        # 确保 per-platform HEARTBEAT.md 存在（被删除则自动重建）
+        if not self._hb_override:
+            asyncio.create_task(self._ensure_per_platform_hb(platform))
         hb = self._hb_for_umo(umo)
         note = NOTE_TPL.format(
             platform=platform,
