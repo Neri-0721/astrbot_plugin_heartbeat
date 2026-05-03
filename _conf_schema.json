@@ -7,6 +7,13 @@
     "minimum": 10,
     "maximum": 1440
   },
+  "startup_behavior": {
+    "title": "启动行为",
+    "description": "on_interaction = 首次对话后才启动心跳; auto = 插件加载后立即启动（需至少有一次对话记录）",
+    "type": "string",
+    "options": ["on_interaction", "auto"],
+    "default": "on_interaction"
+  },
   "target_mode": {
     "title": "目标模式",
     "description": "all = 遍历所有会话，符合条件的触发; last = 只对最后聊天的会话生效",

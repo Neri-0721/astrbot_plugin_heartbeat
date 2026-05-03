@@ -150,13 +150,22 @@ class HeartbeatPlugin(Star):
         self.max_daily = int(self.config.get("max_daily_heartbeats", 48))
         self.cooldown = int(self.config.get("cooldown_seconds", 120))
         self.target_mode = str(self.config.get("target_mode", "all")).strip().lower()
-        # target_mode: "all" | "last"
+        self.startup_behavior = str(self.config.get("startup_behavior", "on_interaction")).strip().lower()
+        # startup_behavior: "on_interaction" (等待首次消息) | "auto" (立即启动)
 
         self._hb_override = str(self.config.get("heartbeat_file_path", "")).strip()
 
+        # auto 模式：尝试从持久化文件恢复上次会话并自动注册
+        if self.startup_behavior == "auto":
+            restored = self._restore_last_session()
+            if restored:
+                logger.info(f"[heartbeat] auto mode: session restored {restored[:40]}")
+                asyncio.create_task(self._delayed_schedule())
+
         logger.info(
             f"[heartbeat] v{_VERSION} | {self.interval}min | "
-            f"mode={self.target_mode} | {self.active_start}-{self.active_end}"
+            f"mode={self.target_mode} | startup={self.startup_behavior} | "
+            f"{self.active_start}-{self.active_end}"
         )
 
     # ── 数据目录初始化 ────────────────────────────────────
@@ -356,7 +365,47 @@ class HeartbeatPlugin(Star):
         )
         logger.info(f"[heartbeat] → agent job={job.job_id}")
 
-    # ── 生命周期 ──────────────────────────────────────────
+    # ── 启停行为 ──────────────────────────────────────────
+
+    def _last_session_path(self):
+        return str(self.data_dir / "last_session.json")
+
+    def _save_last_session(self, umo: str, sender_id: str):
+        """持久化当前会话，供 auto 模式重启后恢复"""
+        import json
+        try:
+            with open(self._last_session_path(), "w", encoding="utf-8") as f:
+                json.dump({"umo": umo, "sender_id": sender_id, "saved_at": time.time()}, f)
+        except Exception as e:
+            logger.warning(f"[heartbeat] save session failed: {e}")
+
+    def _restore_last_session(self) -> Optional[str]:
+        """从持久化文件恢复上次会话"""
+        import json
+        path = self._last_session_path()
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            umo = data.get("umo", "")
+            sid = data.get("sender_id", "")
+            if umo:
+                self._umo = umo
+                self._sender_id = sid
+                self._ready = True
+                # 恢复会话到内存
+                platform = _extract_platform(umo)
+                self._sessions[umo] = {
+                    "sender_id": sid,
+                    "last_interaction": time.time(),
+                    "platform": platform,
+                }
+                self._last_umo = umo
+                return umo
+        except Exception as e:
+            logger.warning(f"[heartbeat] restore session failed: {e}")
+        return None
 
     async def terminate(self):
         await self._unschedule()
@@ -382,7 +431,10 @@ class HeartbeatPlugin(Star):
                 "platform": platform,
             }
         )
-        self._last_umo = umo  # 更新最后聊天的 session
+        self._last_umo = umo
+
+        # 持久化会话（供 auto 模式恢复）
+        self._save_last_session(umo, sid)
 
         if not self._cron_id:
             asyncio.create_task(self._delayed_schedule())
