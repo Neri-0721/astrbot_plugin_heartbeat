@@ -190,7 +190,20 @@ class HeartbeatPlugin(Star):
         1. 用户自定义路径 (heartbeat_file_path)
         2. per-platform: data_dir/heartbeat.d/{platform}.md
         3. 默认: data_dir/HEARTBEAT.md
+        另外：WebUI 的 heartbeat_content 配置会自动同步写入全局 HEARTBEAT.md
         """
+        # WebUI 内容同步：写入全局 HEARTBEAT.md（仅当内容不同时触发写入）
+        hb_from_webui = str(self.config.get("heartbeat_content", "")).strip()
+        if hb_from_webui and not self._hb_override:
+            global_path = self.data_dir / "HEARTBEAT.md"
+            try:
+                current = global_path.read_text(encoding="utf-8") if global_path.exists() else ""
+                if current != hb_from_webui:
+                    global_path.write_text(hb_from_webui, encoding="utf-8")
+                    logger.info("[heartbeat] WebUI content synced to HEARTBEAT.md")
+            except Exception as e:
+                logger.warning(f"[heartbeat] sync HB from WebUI failed: {e}")
+        # 文件查找
         if self._hb_override:
             path = self._hb_override
         else:

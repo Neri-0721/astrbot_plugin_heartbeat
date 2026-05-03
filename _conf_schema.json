@@ -63,11 +63,19 @@
     "minimum": 10,
     "maximum": 3600
   },
-  "heartbeat_file_path": {
-    "title": "HEARTBEAT.md 路径（可选）",
-    "description": "设置后所有会话共用此文件。留空则启用 per-session 模式。路径填写后重启生效。",
+  "heartbeat_content": {
+    "title": "HEARTBEAT.md 内容",
+    "description": "在此编辑心跳任务内容。点保存后自动同步到 HEARTBEAT.md 文件。留空则恢复文件原有内容。使用自然语言描述即可。",
     "type": "string",
     "default": "",
-    "hint": "留空=per-session; 或填写自定义路径"
+    "hint": "编辑后保存，内容将写入 HEARTBEAT.md",
+    "is_long_text": true
+  },
+  "heartbeat_file_path": {
+    "title": "自定义 HEARTBEAT.md 路径（可选）",
+    "description": "指向自定义文件路径。设置后 heartbeat_content 和 per-session 模式失效。",
+    "type": "string",
+    "default": "",
+    "hint": "留空=默认; 或填写绝对路径"
   }
 }
