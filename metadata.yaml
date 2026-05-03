@@ -1,6 +1,6 @@
 name: astrbot_plugin_heartbeat
 display_name: 心跳助手 (Heartbeat)
-desc: 定时唤醒完整 Agent 执行心跳任务。多会话、per-session HEARTBEAT.md、零 token 预检、last/all 模式。
-version: v2.4.0
+desc: 像闹钟一样定时唤醒AI，让它主动关心你。支持多平台（QQ/微信）、各平台独立规则、夜间免打扰、自动跳过繁忙时段。即插即用。
+version: v2.5.0
 author: Neri0721
 repo: https://github.com/Neri-0721/astrbot_plugin_heartbeat

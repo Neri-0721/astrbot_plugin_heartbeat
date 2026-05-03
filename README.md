@@ -1,12 +1,15 @@
-# ❤️ Heartbeat — 定时唤醒 Agent 执行心跳任务
+# ❤️ 心跳助手 (Heartbeat) — AI 定时关怀插件
 
 [![AstrBot](https://img.shields.io/badge/AstrBot-v4.x-blue)](https://github.com/AstrBotDevs/AstrBot)
 [![License](https://img.shields.io/badge/License-AGPL--3.0-green)](LICENSE)
-[![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/)
 
-一个为 AstrBot 设计的心跳插件。定时唤醒**完整 Agent**（带全部工具、Persona、Skills），自主读取 `HEARTBEAT.md` 并决定做什么。
+## 这是干什么的？
 
-> 🧠 不是定时发预设文本——Agent 自己思考、自己决定、自己执行。
+一个定时闹钟，但不是吵你起床——是**让 AI 定时醒来，看看你有没有事**。
+
+比如到了饭点提醒你吃饭、晚上催你睡觉、好久没说话时问候一声。你可以在 `HEARTBEAT.md` 里写任何规则，AI 会自己看、自己想、自己决定怎么做。
+
+> 就跟手机设了个闹钟，到点了 AI 主动来找你。不是发固定文本，AI 会自己思考怎么跟你说。
 
 ---
 
