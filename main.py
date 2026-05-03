@@ -527,13 +527,13 @@ class HeartbeatPlugin(Star):
         path = self._hb_path_for_umo(umo)
         try:
             with open(path, encoding="utf-8") as f:
-                yield event.plain_result(
-                    "HEARTBEAT.md [" + platform + "]:
-
-" + f.read()
-                )
+                content = f.read()
+            yield event.plain_result(
+                "HEARTBEAT.md [" + platform + "]:\n\n" + content
+            )
         except Exception as e:
             yield event.plain_result("error: " + str(e))
+
     @filter.command("heartbeat")
     async def cmd_help(self, event: AstrMessageEvent):
         yield event.plain_result(
