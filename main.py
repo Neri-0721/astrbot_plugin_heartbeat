@@ -187,10 +187,16 @@ class HeartbeatPlugin(Star):
 
     def _hb_for_umo(self, umo: str) -> str:
         """按优先级查找 HEARTBEAT.md：
-        1. 用户自定义路径 (config heartbeat_file_path)
-        2. per-platform: data_dir/heartbeat.d/{platform}.md
-        3. 默认: data_dir/HEARTBEAT.md
+        1. WebUI 配置内容 (heartbeat_content)
+        2. 用户自定义路径 (heartbeat_file_path)
+        3. per-platform: data_dir/heartbeat.d/{platform}.md
+        4. 默认: data_dir/HEARTBEAT.md
         """
+        # 优先级1: WebUI 配置内容
+        hb_content = str(self.config.get("heartbeat_content", "")).strip()
+        if hb_content:
+            return hb_content
+        # 优先级2-4: 文件查找
         if self._hb_override:
             path = self._hb_override
         else:
@@ -199,8 +205,7 @@ class HeartbeatPlugin(Star):
             if per_platform.exists():
                 path = str(per_platform)
             else:
-                path = str(self.data_dir / "HEARTBEAT.md")  # 本次先 fallback
-
+                path = str(self.data_dir / "HEARTBEAT.md")
         try:
             with open(path, encoding="utf-8") as f:
                 return f.read()
@@ -214,25 +219,24 @@ class HeartbeatPlugin(Star):
         pp = self.data_dir / "heartbeat.d" / f"{platform}.md"
         return str(pp if pp.exists() else self.data_dir / "HEARTBEAT.md")
 
+    def _read_default_hb(self) -> str:
+        """读取全局默认 HEARTBEAT.md，供 per-platform 重建时继承"""
+        try:
+            p = self.data_dir / "HEARTBEAT.md"
+            if p.exists():
+                with open(p, encoding="utf-8") as f:
+                    return f.read()
+        except Exception:
+            pass
+        return _DEFAULT_HB
+
     async def _ensure_per_platform_hb(self, platform: str):
-        """如 per-platform HEARTBEAT.md 不存在则自动创建"""
+        """如 per-platform HEARTBEAT.md 不存在则自动创建（内容从全局文件继承）"""
         pp = self.data_dir / "heartbeat.d" / f"{platform}.md"
         if pp.exists():
             return
-        content = (
-            f"# HEARTBEAT.md ({platform})\n\n"
-            f"你是被定时任务唤醒的，不是用户主动找你。\n\n"
-            f"## 规则\n"
-            f"- [12:00-13:00] 提醒吃午饭\n"
-            f"- [18:00-19:00] 问候晚饭\n"
-            f"- [22:00之后] 提醒休息\n"
-            f"- 距上次对话 > 4h → 一句自然问候\n"
-            f"- 距上次对话 < 30min → 不要打扰\n\n"
-            f"## 约束\n"
-            f"- 不要解释'被定时唤醒'\n"
-            f"- 不超过 25 字\n"
-            f"- 没事做就安静结束\n"
-        )
+        global_hb = self._read_default_hb()
+        content = f"> 自动生成，编辑全局 HEARTBEAT.md 或直接修改此文件。\n\n{global_hb}"
         try:
             os.makedirs(self.data_dir / "heartbeat.d", exist_ok=True)
             with open(pp, "w", encoding="utf-8") as f:
