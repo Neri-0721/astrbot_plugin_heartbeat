@@ -187,16 +187,10 @@ class HeartbeatPlugin(Star):
 
     def _hb_for_umo(self, umo: str) -> str:
         """按优先级查找 HEARTBEAT.md：
-        1. WebUI 配置内容 (heartbeat_content)
-        2. 用户自定义路径 (heartbeat_file_path)
-        3. per-platform: data_dir/heartbeat.d/{platform}.md
-        4. 默认: data_dir/HEARTBEAT.md
+        1. 用户自定义路径 (heartbeat_file_path)
+        2. per-platform: data_dir/heartbeat.d/{platform}.md
+        3. 默认: data_dir/HEARTBEAT.md
         """
-        # 优先级1: WebUI 配置内容
-        hb_content = str(self.config.get("heartbeat_content", "")).strip()
-        if hb_content:
-            return hb_content
-        # 优先级2-4: 文件查找
         if self._hb_override:
             path = self._hb_override
         else:
