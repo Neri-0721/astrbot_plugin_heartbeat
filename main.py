@@ -21,7 +21,7 @@ from astrbot.api.star import StarTools, Context, Star, register
 from astrbot.api import logger
 
 _PLUGIN_NAME = "astrbot_plugin_heartbeat"
-_VERSION = "2.4.0"
+_VERSION = "2.5.0"
 _CRON_NAME = "heartbeat_preflight"
 
 # ── 默认 HEARTBEAT.md ────────────────────────────────────
@@ -43,30 +43,7 @@ _DEFAULT_HB = r"""# HEARTBEAT.md
 - 没事做 → 什么都不做，结束
 """
 
-# QQ 专属示例
-_DEFAULT_HB_QQ = r"""# HEARTBEAT.md (QQ)
 
-你是被定时任务唤醒的，不是用户主动找你。
-
-## 规则
-- [12:00-13:00] "吃饭时间到~"
-- [22:00之后] "该睡了"
-- 距上次对话 > 4h → 问候
-
-请使用 QQ 聊天风格。
-"""
-
-# 微信专属示例
-_DEFAULT_HB_WECHAT = r"""# HEARTBEAT.md (微信)
-
-你是被定时任务唤醒的，不是用户主动找你。
-
-## 规则
-- [18:00-19:00] "晚饭吃了吗"
-- 距上次对话 > 8h → 问候（微信不那么频繁）
-
-请使用微信聊天风格，可以带个表情。
-"""
 
 
 def _cron_expr(m: int) -> str:
@@ -547,17 +524,18 @@ class HeartbeatPlugin(Star):
 
     @filter.command("heartbeat")
     async def cmd_help(self, event: AstrMessageEvent):
+        hb_dir = self.data_dir / "heartbeat.d"
+        files = []
+        if hb_dir.exists():
+            for f in sorted(hb_dir.iterdir()):
+                if f.suffix == ".md":
+                    files.append(f.name)
+        s = "\n".join("    " + f for f in (files or ["(auto-create)"]))
         yield event.plain_result(
-            "❤️ 心跳 v2.4\n\n"
-            "【目标模式】\n"
-            "  all  : 遍历所有会话（QQ/微信...）\n"
-            "  last : 只对最后聊天的会话生效\n\n"
-            "【per-session HEARTBEAT.md】\n"
-            "  data/heartbeat.d/qq_official.md\n"
-            "  data/heartbeat.d/lark.md\n"
-            "  data/heartbeat.d/wechat.md\n"
-            "  不存在则回退到 HEARTBEAT.md\n\n"
-            "【命令】\n"
-            "  heartbeat_status / reschedule / unschedule\n"
-            "  heartbeat_test / show / help"
+            "Heartbeat v2.5\n\n"
+            "[Target] all / last\n"
+            "[Startup] on_interaction / auto\n\n"
+            "[Per-session HB]\n" + s + "\n\n"
+            "[Commands] status / reschedule\n"
+            "  unschedule / test / show / help"
         )
