@@ -343,9 +343,9 @@ class HeartbeatPlugin(Star):
         if not cm:
             return
         platform = sess.get("platform", _extract_platform(umo))
-        # 确保 per-platform HEARTBEAT.md 存在（被删除则自动重建）
+        # 确保 per-platform HEARTBEAT.md 存在（被删除则自动重建，await 保证写入后才读取）
         if not self._hb_override:
-            asyncio.create_task(self._ensure_per_platform_hb(platform))
+            await self._ensure_per_platform_hb(platform)
         hb = self._hb_for_umo(umo)
         note = NOTE_TPL.format(
             platform=platform,
