@@ -1,0 +1,15 @@
+<<<<<<< HEAD
+﻿name: astrbot_plugin_heartbeat
+display_name: 心跳助手 (Heartbeat)
+desc: 定时唤醒完整 Agent 执行 HEARTBEAT.md 任务。支持多会话、per-session HEARTBEAT.md、last/all 目标模式、预检零 token 过滤。
+version: v2.4.0
+author: Neri0721
+repo: https://github.com/Neri-0721/astrbot_plugin_heartbeat
+=======
+name: helloworld # 插件唯一识别名，以 astrbot_plugin_ 前缀开头
+display_name: helloworld # 用于展示的名字，可以是方便人类阅读的名字（需要版本 >= v4.5.0，低版本不会报错，请放心填写）
+desc: AstrBot 插件示例。 # 插件简短描述
+version: v1.3.0 # 插件版本号。格式：v1.1.1 或者 v1.1
+author: Soulter # 作者
+repo: https://github.com/Soulter/helloworld # 插件的仓库地址
+>>>>>>> 13b2c8dce7680b12244b40d419657d9e9bd2f372
