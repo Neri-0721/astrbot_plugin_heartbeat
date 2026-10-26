@@ -1,7 +1,7 @@
 {
   "interval_minutes": {
     "title": "心跳预检间隔",
-    "description": "每隔多少分钟检查一次条件。条件不满足时自动跳过，不消耗 token",
+    "description": "每个会话两次后台 Agent 开始执行之间的最小间隔。按真实经过时间计算，分钟级巡检；不补跑错过的轮次。",
     "type": "int",
     "default": 90,
     "minimum": 10,
@@ -11,14 +11,20 @@
     "title": "启动行为",
     "description": "on_interaction = 首次对话后才启动心跳; auto = 插件加载后立即启动（需至少有一次对话记录）",
     "type": "string",
-    "options": ["on_interaction", "auto"],
+    "options": [
+      "on_interaction",
+      "auto"
+    ],
     "default": "on_interaction"
   },
   "target_mode": {
     "title": "目标模式",
-    "description": "all = 遍历所有会话，符合条件的触发; last = 只对最后聊天的会话生效",
+    "description": "all = 公平轮转所有到期会话；last = 仅最后收到真实用户消息的会话。",
     "type": "string",
-    "options": ["all", "last"],
+    "options": [
+      "all",
+      "last"
+    ],
     "default": "all"
   },
   "active_hours_start": {
@@ -34,14 +40,14 @@
     "hint": "HH:MM 格式"
   },
   "check_last_interaction": {
-    "title": "检测互动间隔",
-    "description": "启用后若近期有对话则跳过，免打扰",
+    "title": "近期互动时暂停主动联系",
+    "description": "近期有用户消息时限制主动发送，后台仍可静默执行任务。前台 Agent 正在运行时，本轮后台让行。",
     "type": "bool",
     "default": true
   },
   "interaction_threshold_minutes": {
     "title": "互动静默阈值",
-    "description": "距上次对话不足此分钟数时跳过",
+    "description": "距真实用户消息不足此分钟数时不主动联系。",
     "type": "int",
     "default": 30,
     "minimum": 5,
@@ -65,7 +71,7 @@
   },
   "heartbeat_content": {
     "title": "HEARTBEAT.md 内容",
-    "description": "在此编辑心跳任务内容。点保存后自动同步到 HEARTBEAT.md 文件。留空则恢复文件原有内容。使用自然语言描述即可。",
+    "description": "全局默认手册，运行时直接读取；留空使用原全局文件，不覆盖磁盘。优先级：自定义路径 > 会话文件 > 已定制的平台文件 > 此项 > 全局文件。用 /heartbeat_show 查看实际来源。",
     "type": "string",
     "default": "",
     "hint": "编辑后保存，内容将写入 HEARTBEAT.md",
@@ -73,9 +79,59 @@
   },
   "heartbeat_file_path": {
     "title": "自定义 HEARTBEAT.md 路径（可选）",
-    "description": "指向自定义文件路径。设置后 heartbeat_content 和 per-session 模式失效。",
+    "description": "显式使用此文件，覆盖其他来源。文件不存在或无法读取时暂停该轮，不静默换用其他规则。",
     "type": "string",
     "default": "",
     "hint": "留空=默认; 或填写绝对路径"
+  },
+  "background_outside_active_hours": {
+    "title": "活跃时段外允许静默任务",
+    "description": "关闭时活跃时段外不唤醒；开启后仍可静默做事，但禁止主动联系。",
+    "type": "bool",
+    "default": false
+  },
+  "contact_cooldown_minutes": {
+    "title": "主动联系最小间隔（分钟）",
+    "description": "与后台唤醒间隔分开；最近主动联系后先等待。",
+    "type": "int",
+    "default": 240,
+    "minimum": 1,
+    "maximum": 10080
+  },
+  "max_daily_messages": {
+    "title": "每会话每日主动联系上限",
+    "description": "统计成功发送；不影响静默后台任务。",
+    "type": "int",
+    "default": 3,
+    "minimum": 1,
+    "maximum": 48
+  },
+  "unanswered_backoff_hours": {
+    "title": "未回应首次退避（小时）",
+    "description": "用户未回应时至少等待此时间；连续未回应依次翻倍，最多 8 倍。真实用户消息会重置未回应次数。",
+    "type": "int",
+    "default": 24,
+    "minimum": 1,
+    "maximum": 168
+  },
+  "agent_timeout_seconds": {
+    "title": "每轮 Agent 超时（秒）",
+    "description": "限制一次后台轮次持有会话锁的时间。",
+    "type": "int",
+    "default": 300,
+    "minimum": 10,
+    "maximum": 1800
+  },
+  "allow_group_sessions": {
+    "title": "允许群聊会话",
+    "description": "默认仅私聊。打开后，进入 LLM 的群聊也可登记并使用群聊会话的规则。",
+    "type": "bool",
+    "default": false
+  },
+  "timezone": {
+    "title": "活动时区（可选）",
+    "description": "IANA 时区名称，如 Asia/Shanghai、America/New_York；留空继承 AstrBot 时区，再留空使用系统时区。",
+    "type": "string",
+    "default": ""
   }
 }

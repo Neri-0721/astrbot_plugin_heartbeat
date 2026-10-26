@@ -1,541 +1,367 @@
-"""
-astrbot_plugin_heartbeat — 多会话 + per-session HEARTBEAT.md + last/all 模式
+"""Periodic opportunities for the selected character to act autonomously."""
 
-特色：
-  ◈ 多会话管理：记录所有平台会话（QQ/微信等）
-  ◈ "last" 模式：自动定位到最后聊天的会话（同 OpenClaw）
-  ◈ "all" 模式：遍历所有会话，符合条件的唤醒
-  ◈ 每会话独立 HEARTBEAT.md：QQ 和微信可以有不同的规则
-  ◈ 预检零 token：条件不满足直接跳过，不调 LLM
-  ◈ 通过后委托框架唤醒完整 Agent（build_main_agent）
-"""
+from __future__ import annotations
 
-import os
-import time
 import asyncio
-import datetime
-from typing import Optional
-from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.provider import ProviderRequest
-from astrbot.api.star import StarTools, Context, Star, register
+import json
+import time
+from pathlib import Path
+
 from astrbot.api import logger
+from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.provider import ProviderRequest
+from astrbot.api.star import Context, Star, StarTools, register
+
+from .heartbeat.agent import FullAgent
+from .heartbeat.policy import Settings, candidate_sessions, contact_block, wake_block
+from .heartbeat.rules import RuleBook
+from .heartbeat.state import SessionState, StateStore
 
 _PLUGIN_NAME = "astrbot_plugin_heartbeat"
-_VERSION = "2.5.0"
-_CRON_NAME = "heartbeat_preflight"
-
-# ── 默认 HEARTBEAT.md ────────────────────────────────────
-
-_DEFAULT_HB = r"""# HEARTBEAT.md
-
-你是被定时任务唤醒的，不是用户主动找你。
-
-## 规则
-- [12:00-13:00] 提醒吃午饭
-- [18:00-19:00] 问候晚饭
-- [22:00之后] 提醒休息
-- 距上次对话 > 4h → 自然问候
-- 距上次对话 < 30 分钟 → 不要打扰
-
-## 约束
-- 不要解释"被定时唤醒"
-- 问候不超过 25 字
-- 没事做 → 什么都不做，结束
-"""
-
-
-
-
-def _cron_expr(m: int) -> str:
-    """分钟数 → 合法 cron 表达式
-
-    APScheduler 分钟字段范围 0-59。
-    整小时用小时级 cron，非整小时找最大可整除值+冷却期兜底。
-    """
-    if m < 60:
-        return f"*/{m} * * * *"
-    h = m // 60
-    if m % 60 == 0:
-        return f"0 */{h} * * *"
-    # 非整小时：找 m 和 60 的最大公约数，保底 30
-    f = 60
-    while f > 1 and m % f != 0:
-        f -= 1
-    return f"*/{max(f, 30)} * * * *"
-
-
-def _in_hours(start: str, end: str) -> bool:
-    now = datetime.datetime.now()
-
-    def p(t):
-        h, *m = t.strip().split(":")
-        return int(h) * 60 + (int(m[0]) if m else 0)
-
-    nm = now.hour * 60 + now.minute
-    sm, em = p(start), p(end)
-    return sm <= nm < em if em > sm else (nm >= sm or nm < em)
-
-
-def _extract_platform(umo: str) -> str:
-    """从 umo 中提取平台名：qq_official:1:123 → qq_official"""
-    return umo.split(":")[0] if ":" in umo else umo
-
-
-NOTE_TPL = """Heartbeat check — preflight passed.
-
-Platform: {platform}
-Current time: {time}
-Hours since last user interaction: {hours_idle:.1f}
-
-Your HEARTBEAT.md:
-{hb}"""
+_VERSION = "3.0.0"
 
 
 @register(
-    _PLUGIN_NAME,
-    "Key",
-    "心跳助手：多会话 / per-session HEARTBEAT.md / last/all 模式",
-    _VERSION,
+    _PLUGIN_NAME, "Neri0721", "周期唤醒完整 Agent，自主行动、静默任务与有分寸的联系", _VERSION
 )
 class HeartbeatPlugin(Star):
-    def __init__(self, context: Context, config: dict = None):
+    def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
-        self.config = config or {}
-        self.data_dir = StarTools.get_data_dir(_PLUGIN_NAME)
-        self._init_data_dir()
+        self.config = config if config is not None else {}
+        self.data_dir = Path(StarTools.get_data_dir(_PLUGIN_NAME))
+        self.store = StateStore(self.data_dir)
+        self.state = self.store.load()
+        self.rules = RuleBook(self.data_dir, self.config)
+        self.settings = self._read_settings()
+        self.agent = FullAgent(context, self.state, lambda: self.settings, self._persist)
+        self._run_lock = asyncio.Lock()
+        self._schedule_lock = asyncio.Lock()
+        self._cron_id = None
+        self._active_task = None
+        self._closed = False
+        self._activated = self.settings.startup_behavior == "auto"
 
-        # 会话存储: {umo: {"sender_id":str, "last_interaction":float, "platform":str}}
-        self._sessions: dict[str, dict] = {}
-        self._last_umo: Optional[str] = None  # 最后聊天的 session
-        self._cron_id: Optional[str] = None
+    def _read_settings(self):
+        return Settings.from_config(self.config, self.context.get_config().get("timezone", ""))
 
-        # 全局控制
-        self._running = False
-        self._last_run: float = 0
-        self._count_today = 0
-        self._today = datetime.date.today()
-
-        # 配置
-        self.interval = max(10, int(self.config.get("interval_minutes", 90)))
-        self.cron = _cron_expr(self.interval)
-        self.active_start = str(self.config.get("active_hours_start", "08:00"))
-        self.active_end = str(self.config.get("active_hours_end", "23:30"))
-        self.check_interact = bool(self.config.get("check_last_interaction", True))
-        self.interact_threshold = (
-            int(self.config.get("interaction_threshold_minutes", 30)) * 60
-        )
-        self.max_daily = int(self.config.get("max_daily_heartbeats", 48))
-        self.cooldown = int(self.config.get("cooldown_seconds", 120))
-        self.target_mode = str(self.config.get("target_mode", "all")).strip().lower()
-        self.startup_behavior = str(self.config.get("startup_behavior", "on_interaction")).strip().lower()
-        # startup_behavior: "on_interaction" (等待首次消息) | "auto" (立即启动)
-
-        self._hb_override = str(self.config.get("heartbeat_file_path", "")).strip()
-
-        # auto 模式：尝试从持久化文件恢复上次会话并自动注册
-        if self.startup_behavior == "auto":
-            restored = self._restore_last_session()
-            if restored:
-                logger.info(f"[heartbeat] auto mode: session restored {restored[:40]}")
-                asyncio.create_task(self._delayed_schedule())
-
+    async def initialize(self):
+        await asyncio.to_thread(self.rules.initialize)
+        await self._persist()
+        await self._ensure_schedule()
         logger.info(
-            f"[heartbeat] v{_VERSION} | {self.interval}min | "
-            f"mode={self.target_mode} | startup={self.startup_behavior} | "
-            f"{self.active_start}-{self.active_end}"
+            f"[heartbeat] v{_VERSION} | interval={self.settings.interval_minutes}min | mode={self.settings.target_mode}"
         )
 
-    # ── 数据目录初始化 ────────────────────────────────────
+    async def _persist(self):
+        await self.store.save(self.state)
 
-    def _init_data_dir(self):
-        os.makedirs(self.data_dir, exist_ok=True)
-        # 默认全局 HEARTBEAT.md
-        self._ensure_hb(self.data_dir / "HEARTBEAT.md", _DEFAULT_HB)
-        # per-platform 目录（空目录，后续由 _ensure_per_platform_hb 动态创建）
-        os.makedirs(self.data_dir / "heartbeat.d", exist_ok=True)
+    @filter.on_astrbot_loaded()
+    async def on_loaded(self):
+        """Retry registration when the host has finished starting."""
+        await self._ensure_schedule()
 
-    @staticmethod
-    def _ensure_hb(path, content):
-        if not os.path.exists(path):
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(content)
-
-    # ── HEARTBEAT.md 解析（三层查找） ─────────────────────
-
-    def _hb_for_umo(self, umo: str) -> str:
-        """按优先级查找 HEARTBEAT.md：
-        1. 用户自定义路径 (heartbeat_file_path)
-        2. per-platform: data_dir/heartbeat.d/{platform}.md
-        3. 默认: data_dir/HEARTBEAT.md
-        另外：WebUI 的 heartbeat_content 配置会自动同步写入全局 HEARTBEAT.md
-        """
-        # WebUI 内容同步：写入全局 HEARTBEAT.md（仅当内容不同时触发写入）
-        hb_from_webui = str(self.config.get("heartbeat_content", "")).strip()
-        if hb_from_webui and not self._hb_override:
-            global_path = self.data_dir / "HEARTBEAT.md"
-            try:
-                current = global_path.read_text(encoding="utf-8") if global_path.exists() else ""
-                if current != hb_from_webui:
-                    global_path.write_text(hb_from_webui, encoding="utf-8")
-                    logger.info("[heartbeat] WebUI content synced to HEARTBEAT.md")
-            except Exception as e:
-                logger.warning(f"[heartbeat] sync HB from WebUI failed: {e}")
-        # 文件查找
-        if self._hb_override:
-            path = self._hb_override
-        else:
-            platform = _extract_platform(umo)
-            per_platform = self.data_dir / "heartbeat.d" / f"{platform}.md"
-            if per_platform.exists():
-                path = str(per_platform)
-            else:
-                path = str(self.data_dir / "HEARTBEAT.md")
-        try:
-            with open(path, encoding="utf-8") as f:
-                return f.read()
-        except Exception:
-            return _DEFAULT_HB
-
-    def _hb_path_for_umo(self, umo: str) -> str:
-        if self._hb_override:
-            return self._hb_override
-        platform = _extract_platform(umo)
-        pp = self.data_dir / "heartbeat.d" / f"{platform}.md"
-        return str(pp if pp.exists() else self.data_dir / "HEARTBEAT.md")
-
-    def _read_default_hb(self) -> str:
-        """读取全局默认 HEARTBEAT.md，供 per-platform 重建时继承"""
-        try:
-            p = self.data_dir / "HEARTBEAT.md"
-            if p.exists():
-                with open(p, encoding="utf-8") as f:
-                    return f.read()
-        except Exception:
-            pass
-        return _DEFAULT_HB
-
-    async def _ensure_per_platform_hb(self, platform: str):
-        """如 per-platform HEARTBEAT.md 不存在则自动创建（内容从全局文件继承）"""
-        pp = self.data_dir / "heartbeat.d" / f"{platform}.md"
-        if pp.exists():
-            return
-        global_hb = self._read_default_hb()
-        content = f"> 自动生成，编辑全局 HEARTBEAT.md 或直接修改此文件。\n\n{global_hb}"
-        try:
-            os.makedirs(self.data_dir / "heartbeat.d", exist_ok=True)
-            with open(pp, "w", encoding="utf-8") as f:
-                f.write(content)
-            logger.info(f"[heartbeat] auto-created per-platform HEARTBEAT.md: {pp}")
-        except Exception as e:
-            logger.warning(f"[heartbeat] failed to create per-platform HEARTBEAT.md: {e}")
-
-    # ── 调度 ──────────────────────────────────────────────
-
-    async def _schedule(self):
-        cm = self.context.cron_manager
-        if not cm:
-            return
-        if self._cron_id:
-            try:
-                await cm.delete_job(self._cron_id)
-            except Exception:
-                pass
-        try:
-            job = await cm.add_basic_job(
-                name=_CRON_NAME,
-                cron_expression=self.cron,
+    async def _ensure_schedule(self):
+        async with self._schedule_lock:
+            if self._closed or not self._activated or self.state.paused or self._cron_id:
+                return
+            manager = self.context.cron_manager
+            if manager is None:
+                return
+            # The minute tick is token-free. Persisted per-session deadlines provide
+            # the actual interval, including 45, 90 and 1440 minutes, across restarts.
+            job = await manager.add_basic_job(
+                name="heartbeat_preflight",
+                cron_expression="* * * * *",
                 handler=self._preflight,
-                description=f"heartbeat | {self.target_mode} | {self.interval}min",
+                persistent=False,
+                description=f"Heartbeat v3 | {self.settings.interval_minutes}min | {self.settings.target_mode}",
             )
             self._cron_id = job.job_id
-            logger.info(f"[heartbeat] cron registered id={job.job_id} expr={self.cron}")
-        except Exception as e:
-            logger.error(f"[heartbeat] register fail: {e}")
 
-    async def _unschedule(self):
-        if not self._cron_id:
+    async def _remove_schedule(self):
+        async with self._schedule_lock:
+            if self._cron_id and self.context.cron_manager:
+                await self.context.cron_manager.delete_job(self._cron_id)
+            self._cron_id = None
+
+    @staticmethod
+    def _synthetic(event):
+        return (
+            bool(event.get_extra("heartbeat") or event.get_extra("cron_job"))
+            or event.get_platform_name() == "cron"
+        )
+
+    async def _observe(self, event, *, enroll=False):
+        if self._closed or self._synthetic(event):
             return
-        cm = self.context.cron_manager
-        if cm:
-            try:
-                await cm.delete_job(self._cron_id)
-            except Exception:
-                pass
-        self._cron_id = None
-
-    # ── 预检（零 token） ──────────────────────────────────
-
-    def _get_candidate_sessions(self, now: float) -> list[tuple[str, dict]]:
-        """根据 target_mode 获取候选 session 列表"""
-        if not self._sessions:
-            return []
-
-        if self.target_mode == "last":
-            # "last" 模式：只检查最后聊天的 session
-            if self._last_umo and self._last_umo in self._sessions:
-                return [(self._last_umo, self._sessions[self._last_umo])]
-            return []
-
-        # "all" 模式：遍历所有 session
-        return list(self._sessions.items())
-
-    async def _preflight(self):
+        umo = event.unified_msg_origin
+        sender = event.get_sender_id()
+        if not sender or sender == event.get_self_id():
+            return
+        if umo not in self.state.sessions:
+            if not enroll or (event.get_group_id() and not self.settings.allow_group_sessions):
+                return
+            self.state.sessions[umo] = SessionState(
+                next_due_at=time.time() + self.settings.interval_minutes * 60
+            )
         now = time.time()
+        self.state.sessions[umo].observe_user(sender, now, event.get_platform_name())
+        self.state.last_umo = umo
+        self.agent.interrupt(umo)
+        self._activated = True
+        await self._persist()
+        await self._ensure_schedule()
 
-        if self._running:
-            return
-        if not _in_hours(self.active_start, self.active_end):
-            return
-        if now - self._last_run < self.cooldown:
-            return
-
-        today = datetime.date.today()
-        if today != self._today:
-            self._count_today = 0
-            self._today = today
-        if self._count_today >= self.max_daily:
-            return
-
-        candidates = self._get_candidate_sessions(now)
-        if not candidates:
-            return
-
-        self._running = True
-        triggered = 0
-        try:
-            for umo, sess in candidates:
-                if triggered >= 1:
-                    break
-                if (
-                    self.check_interact
-                    and (now - sess["last_interaction"]) < self.interact_threshold
-                ):
-                    continue
-                self._count_today += 1
-                triggered += 1
-                platform = sess.get("platform", _extract_platform(umo))
-                logger.info(
-                    f"[heartbeat] ▲ #{self._count_today} | {platform} | idle={(now - sess['last_interaction']) / 60:.0f}min"
-                )
-                try:
-                    await self._delegate_wake(umo, sess, now - sess["last_interaction"])
-                except Exception as e:
-                    logger.error(f"[heartbeat] wake fail {umo}: {e}")
-        finally:
-            self._running = False
-            if triggered:
-                self._last_run = time.time()
-
-    async def _delegate_wake(self, umo: str, sess: dict, idle: float):
-        cm = self.context.cron_manager
-        if not cm:
-            return
-        platform = sess.get("platform", _extract_platform(umo))
-        # 确保 per-platform HEARTBEAT.md 存在（被删除则自动重建，await 保证写入后才读取）
-        if not self._hb_override:
-            await self._ensure_per_platform_hb(platform)
-        hb = self._hb_for_umo(umo)
-        note = NOTE_TPL.format(
-            platform=platform,
-            time=datetime.datetime.now().strftime("%H:%M"),
-            hours_idle=idle / 3600,
-            hb=hb,
-        )
-        job = await cm.add_active_job(
-            name=f"hb_{platform[:12]}",
-            cron_expression=None,
-            run_once=True,
-            run_at=datetime.datetime.now(datetime.timezone.utc),
-            payload={
-                "session": umo,
-                "sender_id": sess.get("sender_id", "heartbeat"),
-                "note": note,
-                "origin": "plugin",
-            },
-            description=f"heartbeat {platform}",
-        )
-        logger.info(f"[heartbeat] → agent job={job.job_id}")
-
-    # ── 启停行为 ──────────────────────────────────────────
-
-    def _last_session_path(self):
-        return str(self.data_dir / "last_session.json")
-
-    def _save_last_session(self, umo: str, sender_id: str):
-        """持久化当前会话，供 auto 模式重启后恢复"""
-        import json
-        try:
-            with open(self._last_session_path(), "w", encoding="utf-8") as f:
-                json.dump({"umo": umo, "sender_id": sender_id, "saved_at": time.time()}, f)
-        except Exception as e:
-            logger.warning(f"[heartbeat] save session failed: {e}")
-
-    def _restore_last_session(self) -> Optional[str]:
-        """从持久化文件恢复上次会话"""
-        import json
-        path = self._last_session_path()
-        if not os.path.exists(path):
-            return None
-        try:
-            with open(path, encoding="utf-8") as f:
-                data = json.load(f)
-            umo = data.get("umo", "")
-            sid = data.get("sender_id", "")
-            if umo:
-                self._umo = umo
-                self._sender_id = sid
-                self._ready = True
-                # 恢复会话到内存
-                platform = _extract_platform(umo)
-                self._sessions[umo] = {
-                    "sender_id": sid,
-                    "last_interaction": time.time(),
-                    "platform": platform,
-                }
-                self._last_umo = umo
-                return umo
-        except Exception as e:
-            logger.warning(f"[heartbeat] restore session failed: {e}")
-        return None
-
-    async def terminate(self):
-        await self._unschedule()
-
-    # ── 事件 ──────────────────────────────────────────────
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=100)
+    async def on_message(self, event: AstrMessageEvent):
+        """Observe real messages in known sessions, including non-LLM messages."""
+        await self._observe(event)
 
     @filter.on_llm_request()
-    async def _on_interact(self, event: AstrMessageEvent, req: ProviderRequest):
-        umo = event.unified_msg_origin
-        sid = event.get_sender_id()
-        platform = _extract_platform(umo)
+    async def on_request(self, event: AstrMessageEvent, req: ProviderRequest):
+        """Enroll real conversation sessions; never count background requests as users."""
+        await self._observe(event, enroll=True)
 
-        if umo not in self._sessions:
-            self._sessions[umo] = {}
-            logger.info(f"[heartbeat] +session {platform} | {umo[:40]}")
-            # 新会话：自动创建 per-platform HEARTBEAT.md（如不存在）
-            asyncio.create_task(self._ensure_per_platform_hb(platform))
+    async def _preflight(self):
+        if self._closed or self._run_lock.locked():
+            return
+        for umo in candidate_sessions(self.state, self.settings):
+            if not wake_block(self.state, umo, self.settings, time.time()):
+                outcome = await self._run_one(umo)
+                if outcome != "foreground_busy":
+                    break
 
-        self._sessions[umo].update(
-            {
-                "sender_id": sid,
-                "last_interaction": time.time(),
-                "platform": platform,
-            }
+    def _note(self, umo, handbook, source):
+        now = time.time()
+        session = self.state.sessions[umo]
+        settings = self.settings
+        record = {
+            "current_time": settings.local_time(now).isoformat(),
+            "hours_since_user_message": round((now - session.last_user_at) / 3600, 2)
+            if session.last_user_at
+            else None,
+            "last_background_outcome": session.last_outcome,
+            "previous_agent_summary": session.last_summary,
+            "recent_successful_contacts": session.contacts[-8:],
+            "consecutive_unanswered_contacts": session.unanswered,
+            "task_notes_agent_reported": session.notes,
+            "contact_restriction_now": contact_block(
+                session, settings, now, started_user_at=session.last_user_at
+            )
+            or "none; decide whether contact is worthwhile",
+        }
+        return (
+            "Heartbeat background opportunity. Decide what to do using your persona and context.\n"
+            "Task notes and the previous summary are Agent reports, not independently verified facts.\n\n"
+            + json.dumps(record, ensure_ascii=False, indent=2)
+            + f"\n\nHandbook source: {source}\n\n{handbook}"
         )
-        self._last_umo = umo
 
-        # 持久化会话（供 auto 模式恢复）
-        self._save_last_session(umo, sid)
+    async def _run_one(self, umo, *, manual=False):
+        if self._closed:
+            return "closed"
+        if self._run_lock.locked():
+            return "background_busy"
+        async with self._run_lock:
+            blocked = wake_block(self.state, umo, self.settings, time.time(), manual=manual)
+            if blocked:
+                return blocked
+            started = False
+            self._active_task = asyncio.current_task()
+            session = self.state.sessions[umo]
 
-        if not self._cron_id:
-            asyncio.create_task(self._delayed_schedule())
+            async def on_start():
+                nonlocal started
+                now = time.time()
+                # Reserve the wake before the first model step. Provider/hook failures
+                # before this point consume no wake allowance.
+                self.state.begin(umo, now, self.settings.interval_minutes, self.settings.day(now))
+                await self._persist()
+                started = True
 
-    async def _delayed_schedule(self):
-        await asyncio.sleep(5)
-        await self._schedule()
+            try:
+                handbook, source = await asyncio.to_thread(self.rules.read, umo)
+                result = await self.agent.run(umo, self._note(umo, handbook, source), on_start)
+                session.last_outcome = result.outcome
+                if result.started:
+                    session.last_summary = result.summary
+                elif result.outcome != "foreground_busy":
+                    session.next_due_at = time.time() + self.settings.interval_minutes * 60
+                return result.outcome
+            except asyncio.CancelledError:
+                session.last_outcome = "interrupted" if started else "cancelled_before_start"
+                raise
+            except Exception as exc:
+                session.last_outcome = "failed" if started else "preparation_failed"
+                session.last_summary = f"{type(exc).__name__}: {exc}"[:1000]
+                session.next_due_at = time.time() + self.settings.interval_minutes * 60
+                logger.error(f"[heartbeat] {session.last_outcome}: {exc}", exc_info=True)
+                return session.last_outcome
+            finally:
+                self._active_task = None
+                await asyncio.shield(self._persist())
 
-    # ── 命令 ──────────────────────────────────────────────
+    async def terminate(self):
+        self._closed = True
+        await self._remove_schedule()
+        for umo in list(self.agent.runners):
+            self.agent.interrupt(umo)
+        task = self._active_task
+        if task and task is not asyncio.current_task():
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=5)
+            except TimeoutError:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        await self._persist()
+
+    async def _current(self, event):
+        if event.get_group_id() and (
+            not self.settings.allow_group_sessions or event.role != "admin"
+        ):
+            return None
+        await self._observe(event, enroll=True)
+        return self.state.sessions.get(event.unified_msg_origin)
 
     @filter.command("heartbeat_status")
     async def cmd_status(self, event: AstrMessageEvent):
+        """查看当前会话的后台活动、联系限制和规则来源。"""
+        session = self.state.sessions.get(event.unified_msg_origin)
+        if session is None:
+            yield event.plain_result("当前会话尚未登记；正常聊天后自动登记。群聊需先在配置中允许。")
+            return
         now = time.time()
-        lines = [
-            "❤️ 心跳 v2.4 (多会话 + per-session HB)",
-            f"  模式: {self.target_mode} | cron={self._cron_id or '未注册'}",
-            f"  间隔: {self.interval}min | 活跃: {self.active_start}-{self.active_end}",
-            f"  今日唤醒: {self._count_today}/{self.max_daily}",
-            f"  会话: {len(self._sessions)} 个",
-            f"  最后聊天: {self._last_umo[:40] if self._last_umo else 'N/A'}",
-        ]
-        for umo, sess in sorted(self._sessions.items()):
-            idle = int(now - sess.get("last_interaction", now))
-            plat = sess.get("platform", "?")
-            hb = self._hb_path_for_umo(umo)
-            lines.append(f"    [{plat}] 空闲{idle // 3600}h{idle % 3600 // 60}m | {hb}")
-        if self._cron_id:
-            try:
-                jobs = await self.context.cron_manager.list_jobs("basic")
-                for j in jobs:
-                    if j.job_id == self._cron_id and j.next_run_time:
-                        lines.append(
-                            f"  下次: {j.next_run_time.astimezone().strftime('%m-%d %H:%M')}"
-                        )
-                        break
-            except Exception:
-                pass
-        yield event.plain_result("\n".join(lines))
-
-    @filter.command("heartbeat_reschedule")
-    async def cmd_reschedule(self, event: AstrMessageEvent):
-        self.interval = max(10, int(self.config.get("interval_minutes", 90)))
-        self.cron = _cron_expr(self.interval)
-        await self._schedule()
+        try:
+            _, source = await asyncio.to_thread(self.rules.read, event.unified_msg_origin)
+        except Exception as exc:
+            source = str(exc)
+        count = self.state.wake_count if self.state.wake_day == self.settings.day(now) else 0
+        blocked = contact_block(session, self.settings, now, started_user_at=session.last_user_at)
         yield event.plain_result(
-            f"✅ rescheduled | {self.cron} | sessions={len(self._sessions)}"
+            f"Heartbeat v{_VERSION}\n"
+            f"后台：{'暂停' if self.state.paused or not session.enabled else '启用'}；模式 {self.settings.target_mode}\n"
+            f"间隔：{self.settings.interval_minutes} 分钟；下次检查约 {max(0, int(session.next_due_at - now)) // 60} 分钟后\n"
+            f"今日 Agent 轮次：{count}/{self.settings.max_daily_heartbeats}；已登记会话 {len(self.state.sessions)}\n"
+            f"联系限制：{blocked or '可由 Agent 判断'}；连续未回应 {session.unanswered} 次\n"
+            f"上轮：{session.last_outcome or '尚未运行'}\n规则：{source}\n"
+            f"会话规则路径：{self.rules.session_path(event.unified_msg_origin)}"
         )
 
+    @filter.command("heartbeat_reschedule")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def cmd_reschedule(self, event: AstrMessageEvent):
+        """读取全部配置、恢复全局调度并重新计算下一轮时间（管理员）。"""
+        self.settings = self._read_settings()
+        self.state.paused = False
+        self._activated = True
+        for session in self.state.sessions.values():
+            session.next_due_at = (
+                session.last_wake_at or time.time()
+            ) + self.settings.interval_minutes * 60
+        await self._persist()
+        await self._remove_schedule()
+        await self._ensure_schedule()
+        yield event.plain_result(f"已更新全部配置；间隔 {self.settings.interval_minutes} 分钟。")
+
     @filter.command("heartbeat_unschedule")
+    @filter.permission_type(filter.PermissionType.ADMIN)
     async def cmd_unschedule(self, event: AstrMessageEvent):
-        await self._unschedule()
-        yield event.plain_result("✅ cancelled")
+        """暂停全局后台调度；普通聊天不会重新开启（管理员）。"""
+        self.state.paused = True
+        for umo in list(self.agent.runners):
+            self.agent.interrupt(umo)
+        await self._persist()
+        await self._remove_schedule()
+        yield event.plain_result("已暂停全局心跳；使用 /heartbeat_reschedule 恢复。")
+
+    @filter.command("heartbeat_pause")
+    async def cmd_pause(self, event: AstrMessageEvent):
+        """暂停当前会话的后台活动。"""
+        if session := await self._current(event):
+            session.enabled = False
+            self.agent.interrupt(event.unified_msg_origin)
+            await self._persist()
+            yield event.plain_result("已暂停当前会话的后台活动。")
+        else:
+            yield event.plain_result(
+                "当前会话不可控制；群聊需在配置中允许，并由 AstrBot 管理员操作。"
+            )
+
+    @filter.command("heartbeat_resume")
+    async def cmd_resume(self, event: AstrMessageEvent):
+        """恢复当前会话的后台活动。"""
+        if session := await self._current(event):
+            session.enabled = True
+            session.next_due_at = time.time() + self.settings.interval_minutes * 60
+            await self._persist()
+            yield event.plain_result(
+                "已恢复当前会话；下一轮按配置间隔运行。全局暂停需管理员另行恢复。"
+            )
+        else:
+            yield event.plain_result(
+                "当前会话不可控制；群聊需在配置中允许，并由 AstrBot 管理员操作。"
+            )
+
+    async def _set_quiet(self, event, minutes):
+        if self._synthetic(event):
+            return "请仅在用户明确要求时设置免打扰；后台任务不能替用户修改此设置。"
+        if isinstance(minutes, bool) or not 0 <= minutes <= 10080:
+            return "分钟数需在 0—10080 之间；0 表示解除。"
+        session = await self._current(event)
+        if session is None:
+            return "当前会话不可控制；群聊需先在配置中允许，并由 AstrBot 管理员操作。"
+        session.quiet_until = time.time() + minutes * 60 if minutes else 0
+        await self._persist()
+        return (
+            f"已设置 {minutes} 分钟内不主动联系，后台仍可静默做事。"
+            if minutes
+            else "已解除主动联系免打扰；其他联系限制仍生效。"
+        )
+
+    @filter.command("heartbeat_quiet")
+    async def cmd_quiet(self, event: AstrMessageEvent, minutes: int = 120):
+        """暂停当前会话的主动联系，默认 120 分钟；0 解除。"""
+        yield event.plain_result(await self._set_quiet(event, minutes))
+
+    @filter.llm_tool(name="heartbeat_set_quiet")
+    async def set_quiet(self, event: AstrMessageEvent, minutes: int) -> str:
+        """Only when the user explicitly requests it, pause proactive contact while keeping silent background work.
+
+        Args:
+            minutes(number): Quiet duration in minutes, 0 to lift; maximum 10080.
+        """
+        return await self._set_quiet(event, minutes)
 
     @filter.command("heartbeat_test")
     async def cmd_test(self, event: AstrMessageEvent):
-        umo = event.unified_msg_origin
-        sid = event.get_sender_id()
-        if not umo:
-            yield event.plain_result("❌ no session")
-            return
-        platform = _extract_platform(umo)
-        hb = self._hb_for_umo(umo)
-        note = f"[Manual test] {platform}\n\n{hb}"
-        c = self.context.cron_manager
-        if c:
-            job = await c.add_active_job(
-                name="hb_manual",
-                cron_expression=None,
-                run_once=True,
-                run_at=datetime.datetime.now(datetime.timezone.utc),
-                payload={
-                    "session": umo,
-                    "sender_id": sid,
-                    "note": note,
-                    "origin": "plugin",
-                },
-                description="manual test",
+        """在当前会话立即尝试完整 Agent；仍遵守暂停、预算与联系限制。"""
+        if await self._current(event) is None:
+            yield event.plain_result(
+                "当前会话不可测试；群聊需先在配置中允许，并由 AstrBot 管理员操作。"
             )
-            yield event.plain_result(f"✅ triggered job={job.job_id} [{platform}]")
+            return
+        yield event.plain_result("正在尝试一次后台活动；近期聊天可能使它只做静默任务。")
+        outcome = await self._run_one(event.unified_msg_origin, manual=True)
+        yield event.plain_result(f"后台活动结果：{outcome}")
 
     @filter.command("heartbeat_show")
     async def cmd_show(self, event: AstrMessageEvent):
-        umo = event.unified_msg_origin
-        platform = _extract_platform(umo)
-        if not self._hb_override:
-            await self._ensure_per_platform_hb(platform)
-        path = self._hb_path_for_umo(umo)
+        """显示当前会话实际生效的手册及来源，不创建平台副本。"""
         try:
-            with open(path, encoding="utf-8") as f:
-                content = f.read()
-            yield event.plain_result(
-                "HEARTBEAT.md [" + platform + "]:\n\n" + content
-            )
-        except Exception as e:
-            yield event.plain_result("error: " + str(e))
+            text, source = await asyncio.to_thread(self.rules.read, event.unified_msg_origin)
+            yield event.plain_result(f"规则来源：{source}\n\n{text}")
+        except Exception as exc:
+            yield event.plain_result(f"读取规则失败：{exc}")
 
     @filter.command("heartbeat")
-    async def cmd_help(self, event: AstrMessageEvent):
-        hb_dir = self.data_dir / "heartbeat.d"
-        files = []
-        if hb_dir.exists():
-            for f in sorted(hb_dir.iterdir()):
-                if f.suffix == ".md":
-                    files.append(f.name)
-        s = "\n".join("    " + f for f in (files or ["(auto-create)"]))
+    async def cmd_heartbeat(self, event: AstrMessageEvent):
+        """查看后台活动和主动联系的控制命令。"""
         yield event.plain_result(
-            "Heartbeat v2.5\n\n"
-            "[Target] all / last\n"
-            "[Startup] on_interaction / auto\n\n"
-            "[Per-session HB]\n" + s + "\n\n"
-            "[Commands] status / reschedule\n"
-            "  unschedule / test / show / help"
+            f"Heartbeat v{_VERSION}\n"
+            "/heartbeat_status — 当前会话状态\n"
+            "/heartbeat_show — 实际生效的规则\n"
+            "/heartbeat_test — 尝试一次完整 Agent\n"
+            "/heartbeat_pause / heartbeat_resume — 暂停/恢复当前会话后台活动\n"
+            "/heartbeat_quiet [分钟] — 只暂停主动联系，0 解除\n"
+            "/heartbeat_reschedule / heartbeat_unschedule — 全局恢复/暂停（管理员）"
         )
