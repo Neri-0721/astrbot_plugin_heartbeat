@@ -6,10 +6,17 @@
 
 ## 兼容性与安装
 
-- 版本：3.0.0；声明 AstrBot `>=4.25.1,<5`，已核验的框架版本为 **4.25.1**。后续框架版本仍需验证适配。
+- 版本：3.1.0；声明 AstrBot `>=4.25.1,<5`，已核验的框架版本为 **4.25.1**。后续框架版本仍需验证适配。
 - Python 3.12+；Windows 使用 `tzdata` 时区数据，由 `requirements.txt` 声明。
-- 默认登记进入正常 LLM 对话的私聊会话。群聊默认关闭，需要管理员在插件配置中明确开启。
-- 从插件仓库安装或更新后，通过 WebUI 重载。首次使用时正常聊天一次，然后用 `/heartbeat_status` 查看状态。
+- **所有会话默认关闭**。普通聊天不会自动开启；只有 `enabled_sessions` 名单中的会话才可运行后台 Agent。群聊还需管理员明确允许。
+- 从插件仓库安装或更新后，通过 WebUI 重载。在需要的会话发送 `/heartbeat_enable`，再用 `/heartbeat_status` 查看状态；`/heartbeat_disable` 关闭该会话。
+- 也可在 WebUI 插件配置中管理 `enabled_sessions`。用 `/heartbeat_status` 取得完整会话 ID，保存配置后重载插件，或由管理员执行 `/heartbeat_reschedule`。新加入且尚无会话信息的 ID 需要收到真实消息后才能运行。
+
+会话按完整的 `平台实例 ID:消息类型:会话 ID` 区分，不支持通配符。同一平台里的不同用户、不同机器人实例、不同 WebUI 聊天窗口分别管理开启状态、任务笔记、手册、到期时间、联系记录和联系额度。后台轮次仍公平串行执行，共享全局每日唤醒预算和调度冷却。
+
+开启、关闭命令直接保存 WebUI 使用的同一份插件配置；重启后依据这份名单恢复，旧 `state.json` 的开启标记和 `last_session.json` 都不构成开启许可。默认 `startup_behavior=auto` 恢复已有信息的已开启会话；保留的 `on_interaction` 选项会等待已开启会话收到真实消息再启动调度。关闭会话保留既有任务和联系记录，重新开启不会重置额度。
+
+手动修改 JSON 文件需要重载插件。配置无法保存时，开启操作不新增许可；关闭操作先在本次运行中生效，并提示保存失败，需要在重启前修复配置。后台事件不能通过这些命令修改名单或全局调度。
 - 本版本升级行为和数据迁移见 [CHANGELOG.md](CHANGELOG.md)。已有手册不会被覆盖。
 
 仓库：[Neri-0721/astrbot_plugin_heartbeat](https://github.com/Neri-0721/astrbot_plugin_heartbeat)。市场是否可安装取决于实际收录状态；仓库中有发布信息不等于已经上架。
@@ -18,7 +25,7 @@
 
 ```mermaid
 flowchart TD
-    A[每分钟本地巡检：不调用模型] --> B{会话到期、未暂停且有预算?}
+    A[每分钟本地巡检：不调用模型] --> B{会话明确开启、到期且有预算?}
     B -->|是| C[公平选择会话；前台忙时让行]
     C --> D[读取手册、任务记录、近期联系与会话历史]
     D --> E[构建完整 Agent；注入人格、Skills、工具]
@@ -31,6 +38,8 @@ flowchart TD
 ```
 
 后台与正常聊天共用 AstrBot 的会话锁，避免两边覆盖历史。执行期间收到真实用户消息时，后台会请求协作停止，并阻止继续发送基于旧状态的联系。已经开始的工具操作可能需要返回后才能停止；每轮另有超时上限。
+
+执行前还会检查 AstrBot 的会话总开关、会话 LLM 开关及插件禁用规则。按配置档和会话规则过滤请求钩子与插件工具；本插件的发送入口在发送时再次核对开启许可和宿主开关。关闭当前会话只影响该会话，不会替其他会话关闭后台。
 
 新版本直接在定时回调中构建并等待完整 Agent，不再排入一个插件无法等待完成的一次性 active job。调用顺序与普通聊天保持一致：构建 → 请求前钩子 → reset → Agent 开始/工具/结束事件。定时任务有独立来源标记，不会被本插件误记为用户聊天。
 
@@ -56,9 +65,10 @@ flowchart TD
 | `/heartbeat` | 帮助 |
 | `/heartbeat_status` | 当前会话的后台状态、联系限制、实际规则来源和独立规则路径 |
 | `/heartbeat_show` | 显示当前会话实际生效的手册 |
-| `/heartbeat_test` | 立即尝试完整后台轮次；仅略过到期时间，仍遵守暂停、时段、预算和联系限制 |
-| `/heartbeat_pause` | 暂停当前会话的后台活动 |
-| `/heartbeat_resume` | 恢复当前会话，从配置间隔后运行 |
+| `/heartbeat_enable` | 明确开启当前会话，写入配置名单，从配置间隔后运行 |
+| `/heartbeat_disable` | 关闭当前会话并从配置名单移除；保留历史和任务记录 |
+| `/heartbeat_resume` / `/heartbeat_pause` | 开启 / 关闭的兼容别名，修改同一份配置 |
+| `/heartbeat_test` | 在已开启会话尝试完整后台轮次；仅略过到期时间，不能绕过开启许可及其他限制 |
 | `/heartbeat_quiet 120` | 120 分钟内不主动联系；后台仍可静默做事 |
 | `/heartbeat_quiet 0` | 解除显式免打扰，其他联系限制仍有效 |
 | `/heartbeat_unschedule` | 暂停全局调度，重启和普通聊天不会自动恢复；需要 AstrBot 管理员权限 |
@@ -66,15 +76,16 @@ flowchart TD
 
 聊天 Agent 还可以使用 `heartbeat_set_quiet` 工具，在用户明确要求时设置免打扰；需要当前人格允许该工具。后台轮次不能替用户修改这项设置。
 
-群聊的暂停、恢复、免打扰和手动测试需要 AstrBot 管理员权限；普通成员仍可查看当前会话状态与规则。
+群聊的开启、关闭、免打扰和手动测试需要 AstrBot 管理员权限；普通成员仍可查看当前会话状态与规则。
 
 ## 配置
 
 | 配置 | 默认值 | 含义 |
 | --- | --- | --- |
+| `enabled_sessions` | `[]` | 明确开启的完整会话 ID 名单；空列表全部关闭，不支持通配符。命令与配置管理同一份名单 |
 | `interval_minutes` | `90` | 每会话两轮后台开始时间之间的最小间隔，支持 10—1440 分钟 |
-| `startup_behavior` | `on_interaction` | 等待真实互动后启用调度；`auto` 在加载时恢复已存会话并启用调度 |
-| `target_mode` | `all` | 公平轮转到期会话；`last` 只检查最后收到真实用户消息的会话 |
+| `startup_behavior` | `auto` | 加载后巡检已明确开启且已有信息的会话；`on_interaction` 等已开启会话收到真实消息后才启动调度 |
+| `target_mode` | `all` | 公平轮转已开启的到期会话；`last` 只检查最后收到真实用户消息的已开启会话 |
 | `active_hours_start` / `active_hours_end` | `08:00` / `23:30` | 联系时段；支持跨午夜，相同时间表示全天 |
 | `background_outside_active_hours` | `false` | 时段外是否仍可唤醒做静默任务；开启也不能在时段外主动联系 |
 | `check_last_interaction` | `true` | 近期有真实用户消息时暂停主动联系 |
@@ -85,7 +96,7 @@ flowchart TD
 | `max_daily_messages` | `3` | 每会话每日成功主动联系上限 |
 | `unanswered_backoff_hours` | `24` | 连续未回应的初始等待，逐次翻倍，最多八倍 |
 | `agent_timeout_seconds` | `300` | 每轮包括准备阶段的超时上限 |
-| `allow_group_sessions` | `false` | 允许进入 LLM 对话的群聊登记 |
+| `allow_group_sessions` | `false` | 允许群聊；仍需将目标群聊明确加入开启名单 |
 | `timezone` | 空 | 继承 AstrBot 时区，再为空则使用系统时区；可填写 IANA 时区名称 |
 | `heartbeat_content` | 空 | WebUI 中的全局默认手册；不覆盖磁盘文件 |
 | `heartbeat_file_path` | 空 | 显式自定义手册路径，优先于其他来源 |
@@ -100,7 +111,7 @@ flowchart TD
 HEARTBEAT.md                  原有全局手册，保留
 heartbeat.d/<平台实例ID>.md    兼容已有的平台定制手册
 heartbeat.sessions/<SHA256>.md 真正独立的会话手册，可自行创建
-state.json                    会话、预算、暂停、成功联系和任务进度
+state.json                    会话记录、预算、全局暂停、成功联系和任务进度；开启许可来自插件配置
 last_session.json             旧版恢复文件，迁移后保留原文件
 ```
 

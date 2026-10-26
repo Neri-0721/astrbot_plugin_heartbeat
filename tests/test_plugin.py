@@ -1,5 +1,6 @@
 import asyncio
 import importlib.util
+import json
 import sys
 import tempfile
 import unittest
@@ -60,16 +61,30 @@ def load_plugin():
 PLUGIN = load_plugin()
 
 
-def event(umo=UMO, *, synthetic=False):
+def event(umo=UMO, *, synthetic=False, group=False, admin=False):
     return SimpleNamespace(
         unified_msg_origin=umo,
         get_extra=lambda key: {"heartbeat": {"id": "background"}}.get(key) if synthetic else None,
         get_platform_name=lambda: "aiocqhttp",
         get_sender_id=lambda: "1",
         get_self_id=lambda: "bot",
-        get_group_id=lambda: "",
+        get_group_id=lambda: "group" if group else "",
         plain_result=lambda text: text,
+        role="admin" if admin else "member",
     )
+
+
+class SavedConfig(dict):
+    def __init__(self, path, values):
+        super().__init__(values)
+        self.path = path
+        self.fail_save = False
+        self.save_config()
+
+    def save_config(self):
+        if self.fail_save:
+            raise OSError("read-only config")
+        self.path.write_text(json.dumps(self), encoding="utf-8")
 
 
 class PluginTests(unittest.IsolatedAsyncioTestCase):
@@ -84,7 +99,13 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.context = SimpleNamespace(
             get_config=lambda **kwargs: {"timezone": "UTC"}, cron_manager=self.manager
         )
-        self.config = {"startup_behavior": "auto"}
+        self.config = SavedConfig(
+            Path(self.tmp.name) / "config.json",
+            {
+                "startup_behavior": "auto",
+                "enabled_sessions": [UMO],
+            },
+        )
         self.plugin = PLUGIN.HeartbeatPlugin(self.context, self.config)
         self.clock = patch.object(PLUGIN.time, "time", return_value=NOW)
         self.clock.start()
@@ -158,7 +179,10 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         second = "qq:FriendMessage:2"
         session_type = type(self.plugin.state.sessions[UMO])
         self.plugin.state.sessions[UMO].next_due_at = 0
-        self.plugin.state.sessions[second] = session_type()
+        self.config["enabled_sessions"].append(second)
+        self.plugin.state.sessions[second] = session_type(
+            enabled=True, sender_id="2", platform_type="qq"
+        )
         self.plugin._run_one = AsyncMock(side_effect=["foreground_busy", "completed"])
         await self.plugin._preflight()
         self.assertEqual(self.plugin._run_one.await_count, 2)
@@ -175,3 +199,170 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.quiet_until, NOW + 7200)
         self.assertIn("后台任务不能", await self.plugin._set_quiet(event(synthetic=True), 0))
         self.assertEqual(session.quiet_until, NOW + 7200)
+
+    async def test_ordinary_chat_in_an_unlisted_session_never_enrolls_or_runs(self):
+        other = "qq:FriendMessage:unused"
+        await self.plugin.on_message(event(other))
+        await self.plugin.on_request(event(other), None)
+        self.assertNotIn(other, self.plugin.state.sessions)
+        self.assertEqual(self.plugin.state.last_umo, UMO)
+        self.assertEqual(await self.plugin._run_one(other, manual=True), "session_disabled")
+
+    async def test_empty_configuration_disables_legacy_state_after_restart(self):
+        session = self.plugin.state.sessions[UMO]
+        session.notes["existing-task"] = {"text": "keep"}
+        session.unanswered = 2
+        self.plugin.state.wake_count = 12
+        await self.plugin._persist()
+        self.config["enabled_sessions"] = []
+        restored = PLUGIN.HeartbeatPlugin(self.context, self.config)
+        await restored.initialize()
+        restored.agent.run = AsyncMock()
+        await restored._preflight()
+        restored.agent.run.assert_not_awaited()
+        self.assertFalse(restored.state.sessions[UMO].enabled)
+        self.assertEqual(restored.state.sessions[UMO].notes["existing-task"]["text"], "keep")
+        self.assertEqual(restored.state.sessions[UMO].unanswered, 2)
+        self.assertEqual(restored.state.wake_count, 12)
+
+    async def test_enable_and_disable_commands_manage_the_same_config_file(self):
+        other = "qq:FriendMessage:second"
+        response = await self.plugin._set_enabled(event(other), True)
+        self.assertIn("已开启", response)
+        saved = json.loads(self.config.path.read_text())
+        self.assertEqual(saved["enabled_sessions"], [UMO, other])
+        session = self.plugin.state.sessions[other]
+        session.notes["task"] = {"text": "keep"}
+        self.plugin.agent.interrupt = Mock()
+        response = await self.plugin._set_enabled(event(other), False)
+        self.assertIn("已关闭", response)
+        self.assertEqual(json.loads(self.config.path.read_text())["enabled_sessions"], [UMO])
+        self.assertFalse(session.enabled)
+        self.assertEqual(session.notes["task"]["text"], "keep")
+        self.assertTrue(self.plugin.state.sessions[UMO].enabled)
+        self.plugin.agent.interrupt.assert_called_with(other)
+        restored_config = SavedConfig(self.config.path, json.loads(self.config.path.read_text()))
+        restored = PLUGIN.HeartbeatPlugin(self.context, restored_config)
+        self.assertTrue(restored.state.sessions[UMO].enabled)
+        self.assertFalse(restored.state.sessions[other].enabled)
+
+    async def test_runtime_config_removal_stops_only_that_session(self):
+        other = "qq:FriendMessage:second"
+        await self.plugin._set_enabled(event(other), True)
+        self.config["enabled_sessions"] = [other]
+        self.plugin.agent.interrupt = Mock()
+        self.plugin._run_one = AsyncMock(return_value="completed")
+        self.plugin.state.sessions[other].next_due_at = 0
+        await self.plugin._preflight()
+        self.plugin.agent.interrupt.assert_called_with(UMO)
+        self.plugin._run_one.assert_awaited_once_with(other)
+
+    async def test_failed_enable_is_not_granted_or_reported_as_success(self):
+        other = "qq:FriendMessage:second"
+        self.config.fail_save = True
+        self.assertIn("保存失败", await self.plugin._set_enabled(event(other), True))
+        self.assertNotIn(other, self.config["enabled_sessions"])
+        self.assertFalse(self.plugin.state.sessions[other].enabled)
+        self.assertEqual(await self.plugin._run_one(other, manual=True), "session_disabled")
+
+    async def test_failed_disable_still_stops_runtime_and_reports_persistence_failure(self):
+        self.config.fail_save = True
+        self.assertIn("配置保存失败", await self.plugin._set_enabled(event(), False))
+        self.assertFalse(self.plugin.state.sessions[UMO].enabled)
+        self.assertNotIn(UMO, self.config["enabled_sessions"])
+        self.assertEqual(await self.plugin._run_one(UMO, manual=True), "session_disabled")
+
+    async def test_status_test_and_quiet_never_enable_a_session(self):
+        other = "qq:FriendMessage:second"
+        status = [r async for r in self.plugin.cmd_status(event(other))]
+        self.assertIn(other, status[0])
+        self.assertNotIn(other, self.plugin.state.sessions)
+        responses = [r async for r in self.plugin.cmd_test(event(other))]
+        self.assertIn("未开启", responses[0])
+        await self.plugin._set_quiet(event(other), 120)
+        self.assertNotIn(other, self.config["enabled_sessions"])
+        self.assertFalse(self.plugin.state.sessions[other].enabled)
+
+    async def test_background_cannot_enable_a_session_or_change_global_schedule(self):
+        await self.plugin._set_enabled(event(synthetic=True), True)
+        before = list(self.config["enabled_sessions"])
+        await self.plugin._set_enabled(event(synthetic=True), False)
+        self.assertEqual(self.config["enabled_sessions"], before)
+        async for _ in self.plugin.cmd_unschedule(event(synthetic=True)):
+            pass
+        self.assertFalse(self.plugin.state.paused)
+
+    async def test_group_opt_in_requires_both_configuration_and_admin(self):
+        group = "qq:GroupMessage:1"
+        self.assertIn(
+            "不可控制", await self.plugin._set_enabled(event(group, group=True, admin=True), True)
+        )
+        self.config["allow_group_sessions"] = True
+        self.assertIn("不可控制", await self.plugin._set_enabled(event(group, group=True), True))
+        self.assertIn(
+            "已开启", await self.plugin._set_enabled(event(group, group=True, admin=True), True)
+        )
+
+    async def test_explicit_enable_does_not_lift_global_pause(self):
+        self.plugin.state.paused = True
+        await self.plugin._set_enabled(event(), True)
+        self.assertTrue(self.plugin.state.paused)
+        self.assertEqual(await self.plugin._run_one(UMO, manual=True), "paused")
+
+    async def test_configured_unknown_session_waits_for_real_metadata(self):
+        other = "webchat:FriendMessage:window:2"
+        self.config["enabled_sessions"].append(other)
+        self.plugin._refresh_settings()
+        self.assertNotIn(other, self.plugin.state.sessions)
+        await self.plugin.on_message(event(other))
+        self.assertTrue(self.plugin.state.sessions[other].enabled)
+        self.assertEqual(self.plugin.state.sessions[other].sender_id, "1")
+
+    async def test_other_sessions_activity_does_not_redirect_last_mode(self):
+        self.config["target_mode"] = "last"
+        await self.plugin.on_request(event("qq:FriendMessage:unused"), None)
+        self.plugin._run_one = AsyncMock(return_value="completed")
+        self.plugin.state.sessions[UMO].next_due_at = 0
+        await self.plugin._preflight()
+        self.plugin._run_one.assert_awaited_once_with(UMO)
+
+    async def test_old_single_session_file_cannot_grant_permission(self):
+        self.plugin.store.path.unlink()
+        self.plugin.store.legacy_path.write_text(
+            json.dumps({"umo": UMO, "sender_id": "1", "saved_at": 123})
+        )
+        self.config["enabled_sessions"] = []
+        restored = PLUGIN.HeartbeatPlugin(self.context, self.config)
+        self.assertEqual(restored.state.sessions[UMO].last_user_at, 123)
+        self.assertFalse(restored.state.sessions[UMO].enabled)
+        self.assertEqual(await restored._run_one(UMO, manual=True), "session_disabled")
+
+    async def test_missing_legacy_metadata_does_not_starve_ready_sessions(self):
+        legacy = "aa:FriendMessage:old"
+        self.config["enabled_sessions"].append(legacy)
+        self.plugin.state.sessions[legacy] = type(self.plugin.state.sessions[UMO])(enabled=True)
+        self.plugin.state.sessions[UMO].next_due_at = 0
+        self.plugin._run_one = AsyncMock(return_value="completed")
+        await self.plugin._preflight()
+        self.plugin._run_one.assert_awaited_once_with(UMO)
+
+    async def test_turn_records_and_shutdown_are_independent_between_sessions(self):
+        other = "qq:FriendMessage:second"
+        await self.plugin._set_enabled(event(other), True)
+
+        async def run(umo, note, start):
+            await start()
+            return SimpleNamespace(started=True, outcome="completed", summary="Result for " + umo)
+
+        self.plugin.agent.run = run
+        await self.plugin._run_one(UMO, manual=True)
+        with patch.object(PLUGIN.time, "time", return_value=NOW + 121):
+            await self.plugin._run_one(other, manual=True)
+        with patch.object(PLUGIN.time, "time", return_value=NOW + 242):
+            await self.plugin._set_enabled(event(), False)
+            await self.plugin._run_one(other, manual=True)
+        self.assertEqual(self.plugin.state.sessions[UMO].last_summary, "Result for " + UMO)
+        self.assertEqual(self.plugin.state.sessions[other].last_summary, "Result for " + other)
+        self.assertFalse(self.plugin.state.sessions[UMO].enabled)
+        self.assertTrue(self.plugin.state.sessions[other].enabled)
+        self.assertEqual(self.plugin.state.wake_count, 3)

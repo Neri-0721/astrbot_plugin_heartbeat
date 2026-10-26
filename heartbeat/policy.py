@@ -34,8 +34,9 @@ def clock_minutes(value: str) -> int:
 
 @dataclass(frozen=True)
 class Settings:
+    enabled_sessions: tuple[str, ...] = ()
     interval_minutes: int = 90
-    startup_behavior: str = "on_interaction"
+    startup_behavior: str = "auto"
     target_mode: str = "all"
     active_hours_start: str = "08:00"
     active_hours_end: str = "23:30"
@@ -58,7 +59,24 @@ class Settings:
         for name in cls.__dataclass_fields__:
             value = config.get(name, getattr(defaults, name))
             default = getattr(defaults, name)
-            if isinstance(default, bool):
+            if name == "enabled_sessions":
+                if not isinstance(value, (list, tuple)):
+                    raise ValueError("enabled_sessions must be a list of complete session IDs")
+                sessions = []
+                for umo in value:
+                    parts = umo.strip().split(":", 2) if isinstance(umo, str) else []
+                    if (
+                        len(parts) != 3
+                        or not all(parts)
+                        or parts[1] not in {"FriendMessage", "GroupMessage"}
+                        or any(c in umo for c in "*?\r\n")
+                    ):
+                        raise ValueError(
+                            "enabled_sessions requires exact platform:type:session IDs"
+                        )
+                    sessions.append(umo.strip())
+                value = tuple(dict.fromkeys(sessions))
+            elif isinstance(default, bool):
                 if not isinstance(value, bool):
                     raise ValueError(f"{name} must be a boolean")
             elif isinstance(default, int):
@@ -106,10 +124,15 @@ class Settings:
 
 
 def candidate_sessions(state: HeartbeatState, settings: Settings) -> list[str]:
+    enabled = {
+        umo
+        for umo, session in state.sessions.items()
+        if umo in settings.enabled_sessions and session.enabled
+    }
     if settings.target_mode == "last":
-        return [state.last_umo] if state.last_umo in state.sessions else []
+        return [state.last_umo] if state.last_umo in enabled else []
     return sorted(
-        state.sessions,
+        enabled,
         key=lambda umo: (state.sessions[umo].last_wake_at, umo),
     )
 
@@ -117,6 +140,8 @@ def candidate_sessions(state: HeartbeatState, settings: Settings) -> list[str]:
 def wake_block(
     state: HeartbeatState, umo: str, settings: Settings, now: float, *, manual=False
 ) -> str:
+    if umo not in settings.enabled_sessions:
+        return "session_disabled"
     session = state.sessions[umo]
     if state.paused or not session.enabled:
         return "paused"

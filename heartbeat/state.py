@@ -15,7 +15,8 @@ from pathlib import Path
 class SessionState:
     sender_id: str = ""
     platform_type: str = ""
-    enabled: bool = True
+    # Runtime cache only; the configuration allowlist is the authority.
+    enabled: bool = False
     quiet_until: float = 0
     last_user_at: float = 0
     last_wake_at: float = 0
@@ -88,6 +89,7 @@ class StateStore:
                     **{k: v for k, v in value.items() if k in session_fields}
                 )
             for session in state.sessions.values():
+                session.enabled = False
                 if session.last_outcome == "running":
                     session.last_outcome = "interrupted_by_restart"
             self._validate(state)

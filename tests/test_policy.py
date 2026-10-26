@@ -11,8 +11,8 @@ UMO = "qq:FriendMessage:1"
 
 class PolicyTests(unittest.TestCase):
     def setUp(self):
-        self.settings = Settings(timezone="UTC")
-        self.session = SessionState(last_user_at=NOW - 20000)
+        self.settings = Settings(enabled_sessions=(UMO,), timezone="UTC")
+        self.session = SessionState(enabled=True, last_user_at=NOW - 20000)
         self.state = HeartbeatState(sessions={UMO: self.session})
 
     def contact(self, **kwargs):
@@ -35,7 +35,8 @@ class PolicyTests(unittest.TestCase):
 
     def test_all_rotates_to_least_recently_woken(self):
         other = "qq:FriendMessage:2"
-        self.state.sessions[other] = SessionState()
+        self.settings = replace(self.settings, enabled_sessions=(UMO, other))
+        self.state.sessions[other] = SessionState(enabled=True)
         first = candidate_sessions(self.state, self.settings)[0]
         self.state.begin(first, NOW, 90, self.settings.day(NOW))
         self.assertNotEqual(candidate_sessions(self.state, self.settings)[0], first)
@@ -142,7 +143,21 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(wake_block(self.state, UMO, self.settings, NOW, manual=True), "paused")
         self.state.paused = False
         group = "qq:GroupMessage:3"
-        self.state.sessions[group] = SessionState()
+        self.state.sessions[group] = SessionState(enabled=True)
         self.assertEqual(
-            wake_block(self.state, group, self.settings, NOW), "group_sessions_disabled"
+            wake_block(self.state, group, replace(self.settings, enabled_sessions=(group,)), NOW),
+            "group_sessions_disabled",
         )
+
+    def test_empty_allowlist_blocks_even_a_legacy_enabled_flag(self):
+        self.assertEqual(wake_block(self.state, UMO, Settings(), NOW), "session_disabled")
+        self.assertEqual(candidate_sessions(self.state, Settings()), [])
+
+    def test_configuration_requires_exact_session_ids(self):
+        for value in ("qq:FriendMessage:1", ["qq:*:*"], [""], [1], ["qq:OtherMessage:1"]):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                Settings.from_config({"enabled_sessions": value})
+        settings = Settings.from_config(
+            {"enabled_sessions": [UMO, UMO, "webchat:FriendMessage:a:b"]}
+        )
+        self.assertEqual(settings.enabled_sessions, (UMO, "webchat:FriendMessage:a:b"))

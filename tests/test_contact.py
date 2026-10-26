@@ -14,7 +14,9 @@ class FakeTool:
 
 class ContactTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.state = HeartbeatState(sessions={UMO: SessionState(last_user_at=NOW - 20000)})
+        self.state = HeartbeatState(
+            sessions={UMO: SessionState(enabled=True, last_user_at=NOW - 20000)}
+        )
         self.saves = 0
         self.calls = 0
 
@@ -23,7 +25,11 @@ class ContactTests(unittest.IsolatedAsyncioTestCase):
 
         self.save = save
         self.gate = ContactGate(
-            self.state, UMO, lambda: Settings(timezone="UTC"), save, clock=lambda: NOW
+            self.state,
+            UMO,
+            lambda: Settings(enabled_sessions=(UMO,), timezone="UTC"),
+            save,
+            clock=lambda: NOW,
         )
         self.messages = [{"type": "plain", "text": "hello"}]
 
@@ -131,3 +137,22 @@ class ContactTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(note["source"], "agent_report")
         await tool.call(None, key="book", text="Chapter 1 read", status="done")
         self.assertEqual(self.state.sessions[UMO].notes["book"]["status"], "done")
+
+    async def test_removal_from_configuration_blocks_send_even_with_stale_state(self):
+        self.gate.get_settings = lambda: Settings()
+        self.assertIn(
+            "session_disabled",
+            await self.gate.deliver(self.messages, "topic", "reason", self.transport),
+        )
+        self.assertEqual(self.calls, 0)
+
+    async def test_host_disable_during_a_turn_blocks_delivery(self):
+        async def access(umo):
+            return "host_llm_disabled", None
+
+        self.gate.access = access
+        self.assertIn(
+            "host_llm_disabled",
+            await self.gate.deliver(self.messages, "topic", "reason", self.transport),
+        )
+        self.assertEqual(self.calls, 0)

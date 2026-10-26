@@ -19,10 +19,13 @@ from unittest.mock import patch
 
 
 async def verify():
-    from astrbot.core.agent.tool import ToolSet
+    from astrbot.core import sp
+    from astrbot.core.agent.tool import FunctionTool, ToolSet
+    from astrbot.core.config.astrbot_config import AstrBotConfig
     from astrbot.core.provider.entities import LLMResponse, ProviderMeta, ProviderType
     from astrbot.core.provider.provider import Provider
     from astrbot.core.star.context import Context
+    from astrbot.core.star.star import StarMetadata, star_map
 
     from heartbeat.agent import FullAgent
     from heartbeat.policy import Settings
@@ -65,6 +68,7 @@ async def verify():
                 for m in kwargs.get("contexts", [])
             ]
             system = str(messages[0].get("content"))
+            assert kwargs["func_tool"].get_tool("fixture_excluded") is None
             assert "OFFLINE_PERSONA_MARKER" in system, "Selected persona was not injected"
             assert "OFFLINE_MEMORY_MARKER" in system, "Request hook did not run before reset"
             if self.calls % 2:
@@ -94,7 +98,16 @@ async def verify():
 
     class ToolManager:
         def get_full_tool_set(self):
-            return ToolSet()
+            return ToolSet(
+                [
+                    FunctionTool(
+                        name="fixture_excluded",
+                        description="Must be filtered by session rules",
+                        parameters={"type": "object", "properties": {}},
+                        handler_module_path="fixture.excluded",
+                    )
+                ]
+            )
 
         def get_builtin_tool(self, cls):
             return cls()
@@ -149,15 +162,21 @@ async def verify():
             update_conversation=update,
         ),
         send_message=send,
+        cron_manager=None,
     )
     state = HeartbeatState(
         sessions={
             umo: SessionState(
-                sender_id="test-user", platform_type="aiocqhttp", last_user_at=time.time() - 20000
+                enabled=True,
+                sender_id="test-user",
+                platform_type="aiocqhttp",
+                last_user_at=time.time() - 20000,
             )
         }
     )
-    settings = Settings(active_hours_start="00:00", active_hours_end="00:00")
+    settings = Settings(
+        enabled_sessions=(umo,), active_hours_start="00:00", active_hours_end="00:00"
+    )
 
     async def save():
         pass
@@ -173,7 +192,29 @@ async def verify():
         return False
 
     agent = FullAgent(context, state, lambda: settings, save)
+    # These preferences are written only to the subprocess's temporary database.
+    for rule, values, outcome in (
+        ("session_service_config", {"session_enabled": False}, "host_session_disabled"),
+        ("session_service_config", {"llm_enabled": False}, "host_llm_disabled"),
+        (
+            "session_plugin_config",
+            {umo: {"disabled_plugins": ["astrbot_plugin_heartbeat"]}},
+            "plugin_disabled_for_session",
+        ),
+    ):
+        await sp.put_async(scope="umo", scope_id=umo, key=rule, value=values)
+        result = await agent.run(umo, "Must not run", start)
+        assert result.outcome == outcome, result
+        await sp.put_async(scope="umo", scope_id=umo, key=rule, value={})
+    assert provider.calls == 0 and not deliveries
+    await sp.put_async(
+        scope="umo",
+        scope_id=umo,
+        key="session_plugin_config",
+        value={umo: {"disabled_plugins": ["fixture_excluded_plugin"]}},
+    )
     with (
+        patch.dict(star_map, {"fixture.excluded": StarMetadata(name="fixture_excluded_plugin")}),
         patch("astrbot.core.pipeline.context_utils.call_event_hook", side_effect=hook),
         patch("astrbot.core.astr_agent_hooks.call_event_hook", side_effect=hook),
     ):
@@ -203,6 +244,8 @@ async def verify():
                 "request_hooks": steps.count("OnLLMRequestEvent"),
                 "agent_begin_hooks": steps.count("OnAgentBeginEvent"),
                 "agent_done_hooks": steps.count("OnAgentDoneEvent"),
+                "host_disabled_cases_blocked_without_model": 3,
+                "session_excluded_tool_filtered": True,
             },
             ensure_ascii=False,
             indent=2,
@@ -220,8 +263,30 @@ async def verify():
         "get_data_dir",
         return_value=Path(os.environ["ASTRBOT_ROOT"]) / "plugin-data",
     ):
-        plugin = candidate.HeartbeatPlugin(context, {})
+        plugin_config_path = Path(os.environ["ASTRBOT_ROOT"]) / "heartbeat-config.json"
+        schema = json.loads((root / "_conf_schema.json").read_text(encoding="utf-8"))
+        plugin_config = AstrBotConfig(config_path=str(plugin_config_path), schema=schema)
+        plugin = candidate.HeartbeatPlugin(context, plugin_config)
         await plugin.initialize()
+        observed = SimpleNamespace(
+            unified_msg_origin=umo,
+            get_extra=lambda key: None,
+            get_sender_id=lambda: "test-user",
+            get_self_id=lambda: "bot",
+            get_platform_name=lambda: "aiocqhttp",
+            get_group_id=lambda: "",
+        )
+        await plugin.on_request(observed, None)
+        assert not plugin.state.sessions, "Ordinary chat must not enroll an unlisted session"
+        assert "已开启" in await plugin._set_enabled(observed, True)
+        persisted = AstrBotConfig(config_path=str(plugin_config_path), schema=schema)
+        assert persisted["enabled_sessions"] == [umo]
+        assert plugin.state.sessions[umo].enabled
+        assert "已关闭" in await plugin._set_enabled(observed, False)
+        assert (
+            json.loads(plugin_config_path.read_text(encoding="utf-8-sig"))["enabled_sessions"] == []
+        )
+        assert not plugin.state.sessions[umo].enabled
         await plugin.terminate()
     print("Native plugin import, decorators, initialization and termination: OK")
 

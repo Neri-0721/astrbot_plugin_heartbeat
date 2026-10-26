@@ -11,6 +11,7 @@ from dataclasses import dataclass, fields
 from types import SimpleNamespace
 
 from .policy import contact_block, message_digest
+from .sessions import session_access
 
 BACKGROUND_INSTRUCTIONS = """This is a background heartbeat opportunity, not a new user message.
 Remain the selected character. Use conversation history, memory, the heartbeat handbook,
@@ -31,10 +32,12 @@ internal result and is not automatically sent to the user. Never expose private 
 
 def load_framework():
     # Keep AstrBot imports here so state/policy tests do not need a running host.
+    from astrbot.core import sp
     from astrbot.core.agent.tool import FunctionTool, ToolSet
     from astrbot.core.astr_main_agent import (
         MainAgentBuildConfig,
         _get_session_conv,
+        _plugin_tool_fix,
         build_main_agent,
     )
     from astrbot.core.cron.events import CronMessageEvent
@@ -42,6 +45,8 @@ def load_framework():
     from astrbot.core.platform.astrbot_message import MessageMember
     from astrbot.core.platform.message_session import MessageSession
     from astrbot.core.provider.entities import ProviderRequest
+    from astrbot.core.star.session_llm_manager import SessionServiceManager
+    from astrbot.core.star.star import star_map
     from astrbot.core.star.star_handler import EventType
     from astrbot.core.utils.session_lock import session_lock_manager
 
@@ -58,6 +63,10 @@ def load_framework():
         call_event_hook=call_event_hook,
         EventType=EventType,
         session_lock_manager=session_lock_manager,
+        SessionServiceManager=SessionServiceManager,
+        sp=sp,
+        star_map=star_map,
+        filter_plugin_tools=_plugin_tool_fix,
     )
 
 
@@ -71,7 +80,7 @@ class RunResult:
 class ContactGate:
     """Recheck policy at actual send time and count successful delivery only."""
 
-    def __init__(self, state, umo, get_settings, persist, *, clock=time.time):
+    def __init__(self, state, umo, get_settings, persist, *, clock=time.time, access=None):
         self.state = state
         self.umo = umo
         self.get_settings = get_settings
@@ -80,6 +89,7 @@ class ContactGate:
         self.started_user_at = state.sessions[umo].last_user_at
         self.sent = False
         self.lock = asyncio.Lock()
+        self.access = access
 
     async def deliver(self, messages, topic, reason, transport):
         if not isinstance(topic, str) or not topic.strip() or len(topic) > 96:
@@ -91,6 +101,11 @@ class ContactGate:
         topic = topic.strip().casefold()
         digest = message_digest(messages)
         async with self.lock:
+            settings = self.get_settings()
+            if self.umo not in settings.enabled_sessions:
+                return "blocked: session_disabled"
+            if self.access and (blocked := (await self.access(self.umo))[0]):
+                return f"blocked: {blocked}"
             if self.state.paused:
                 return "blocked: heartbeat_paused"
             if self.sent:
@@ -227,8 +242,20 @@ class FullAgent:
         if runner := self.runners.get(umo):
             runner.request_stop()
 
+    async def access(self, umo, *, fw=None, cfg=None):
+        settings = self.get_settings()
+        if umo not in settings.enabled_sessions or not self.state.sessions[umo].enabled:
+            return "session_disabled", None
+        if self.state.paused:
+            return "heartbeat_paused", None
+        fw = fw or load_framework()
+        cfg = cfg if cfg is not None else self.context.get_config(umo=umo)
+        return await session_access(fw, umo, cfg)
+
     async def run(self, umo, note, on_start):
         fw = load_framework()
+        if blocked := (await self.access(umo, fw=fw))[0]:
+            return RunResult(outcome=blocked)
         # A background turn yields immediately when foreground chat owns the lock.
         lock = fw.session_lock_manager.acquire_lock(umo)
         try:
@@ -245,7 +272,7 @@ class FullAgent:
 
     async def _run_locked(self, fw, umo, note, on_start):
         session = self.state.sessions[umo]
-        gate = ContactGate(self.state, umo, self.get_settings, self.persist)
+        gate = ContactGate(self.state, umo, self.get_settings, self.persist, access=self.access)
         context = self.context
 
         class HeartbeatEvent(fw.CronMessageEvent):
@@ -284,16 +311,10 @@ class FullAgent:
             event.platform_meta.name = session.platform_type
         cfg = context.get_config(umo=umo)
         event.role = "admin" if session.sender_id in cfg.get("admins_id", []) else "member"
-        plugins = cfg.get("plugin_set", ["*"])
-        if plugins != ["*"] and not {
-            "astrbot_plugin_heartbeat",
-            "Neri0721/astrbot_plugin_heartbeat",
-        }.intersection(plugins):
-            return RunResult(outcome="plugin_disabled_for_session")
-        event.plugins_name = None if plugins == ["*"] else plugins
+        blocked, event.plugins_name = await self.access(umo, fw=fw, cfg=cfg)
+        if blocked:
+            return RunResult(outcome=blocked)
         provider_settings = cfg.get("provider_settings", {})
-        if not provider_settings.get("enable", True):
-            return RunResult(outcome="model_disabled")
         allowed = {f.name for f in fields(fw.MainAgentBuildConfig)}
         options = {k: v for k, v in provider_settings.items() if k in allowed}
         options.update(
@@ -323,6 +344,8 @@ class FullAgent:
             # then reset and execute. Heartbeat's own interaction hook ignores the marker.
             if await fw.call_event_hook(event, fw.EventType.OnLLMRequestEvent, req):
                 return RunResult(outcome="stopped_by_request_hook")
+            if blocked := (await self.access(umo, fw=fw))[0]:
+                return RunResult(outcome=blocked)
             if (
                 session.last_user_at > gate.started_user_at
                 or self.state.paused
@@ -330,6 +353,7 @@ class FullAgent:
             ):
                 return RunResult(outcome="state_changed_before_start")
             req.func_tool = fw.ToolSet(list(req.func_tool.tools) if req.func_tool else [])
+            fw.filter_plugin_tools(event, req)
             original = req.func_tool.get_tool("send_message_to_user")
             if original is not None:
                 req.func_tool.add_tool(guarded_send_tool(fw, original, gate))
@@ -338,6 +362,8 @@ class FullAgent:
                 raise RuntimeError("AstrBot did not provide a deferred agent reset")
             await reset
             reset = None
+            if blocked := (await self.access(umo, fw=fw))[0]:
+                return RunResult(outcome=blocked)
             if (
                 session.last_user_at > gate.started_user_at
                 or self.state.paused
@@ -347,8 +373,17 @@ class FullAgent:
             runner = result.agent_runner
             self.runners[umo] = runner
             await on_start()
+            if session.last_user_at > gate.started_user_at or (await self.access(umo, fw=fw))[0]:
+                return RunResult(
+                    started=True, outcome="interrupted", summary="Stopped before model step"
+                )
             async for _ in runner.step_until_done(provider_settings.get("max_agent_step", 30)):
-                pass
+                if (
+                    self.state.paused
+                    or session.last_user_at > gate.started_user_at
+                    or (await self.access(umo, fw=fw))[0]
+                ):
+                    runner.request_stop()
             response = runner.get_final_llm_resp()
             summary = (response.completion_text or "")[:4000] if response else ""
             outcome = (

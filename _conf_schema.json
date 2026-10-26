@@ -1,4 +1,10 @@
 {
+  "enabled_sessions": {
+    "title": "开启心跳的会话",
+    "description": "仅这些完整会话 ID 可运行心跳，默认空列表全部关闭；不支持通配符。用 /heartbeat_status 获取当前 ID，或用 /heartbeat_enable、/heartbeat_disable 直接修改此名单并保存。配置中添加的新会话需收到真实消息以取得运行信息。保存后重载插件，或由管理员执行 /heartbeat_reschedule 应用。",
+    "type": "list",
+    "default": []
+  },
   "interval_minutes": {
     "title": "心跳预检间隔",
     "description": "每个会话两次后台 Agent 开始执行之间的最小间隔。按真实经过时间计算，分钟级巡检；不补跑错过的轮次。",
@@ -9,17 +15,17 @@
   },
   "startup_behavior": {
     "title": "启动行为",
-    "description": "on_interaction = 首次对话后才启动心跳; auto = 插件加载后立即启动（需至少有一次对话记录）",
+    "description": "仅控制调度器启动：on_interaction = 已开启会话收到真实消息后启动；auto = 加载后启动巡检。均只运行 enabled_sessions 中明确开启且已有会话信息的会话，不自动授权。",
     "type": "string",
     "options": [
       "on_interaction",
       "auto"
     ],
-    "default": "on_interaction"
+    "default": "auto"
   },
   "target_mode": {
     "title": "目标模式",
-    "description": "all = 公平轮转所有到期会话；last = 仅最后收到真实用户消息的会话。",
+    "description": "all = 公平轮转已明确开启的到期会话；last = 仅最后收到真实用户消息的已开启会话。",
     "type": "string",
     "options": [
       "all",
@@ -74,7 +80,7 @@
     "description": "全局默认手册，运行时直接读取；留空使用原全局文件，不覆盖磁盘。优先级：自定义路径 > 会话文件 > 已定制的平台文件 > 此项 > 全局文件。用 /heartbeat_show 查看实际来源。",
     "type": "string",
     "default": "",
-    "hint": "编辑后保存，内容将写入 HEARTBEAT.md",
+    "hint": "保存并应用后作为全局默认手册，不改写磁盘手册",
     "is_long_text": true
   },
   "heartbeat_file_path": {
@@ -124,7 +130,7 @@
   },
   "allow_group_sessions": {
     "title": "允许群聊会话",
-    "description": "默认仅私聊。打开后，进入 LLM 的群聊也可登记并使用群聊会话的规则。",
+    "description": "默认仅私聊。开启此项仍需在 enabled_sessions 中明确开启群聊；会话内控制需管理员操作。",
     "type": "bool",
     "default": false
   },

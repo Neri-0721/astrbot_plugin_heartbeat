@@ -4,7 +4,7 @@ import unittest
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from heartbeat.agent import FullAgent
 from heartbeat.policy import Settings
@@ -55,7 +55,10 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.state = HeartbeatState(
             sessions={
                 UMO: SessionState(
-                    sender_id="real-user", platform_type="aiocqhttp", last_user_at=NOW - 20000
+                    enabled=True,
+                    sender_id="real-user",
+                    platform_type="aiocqhttp",
+                    last_user_at=NOW - 20000,
                 )
             }
         )
@@ -93,7 +96,8 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             ),
             send_message=send,
         )
-        self.agent = FullAgent(self.context, self.state, lambda: Settings(timezone="UTC"), save)
+        self.settings = Settings(enabled_sessions=(UMO,), timezone="UTC")
+        self.agent = FullAgent(self.context, self.state, lambda: self.settings, save)
         owner = self
 
         class Runner:
@@ -156,6 +160,13 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             get_session_conv=get_conv,
             build_main_agent=build,
             session_lock_manager=SimpleNamespace(acquire_lock=acquire_lock),
+            SessionServiceManager=SimpleNamespace(
+                is_session_enabled=AsyncMock(return_value=True),
+                is_llm_enabled_for_session=AsyncMock(return_value=True),
+            ),
+            sp=SimpleNamespace(get_async=AsyncMock(return_value={})),
+            star_map={},
+            filter_plugin_tools=Mock(),
         )
         self.patch = patch("heartbeat.agent.load_framework", return_value=self.fw)
         self.patch.start()
@@ -241,3 +252,61 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.outcome, "completed")
         self.assertEqual(self.state.sessions[UMO].notes["todo"]["status"], "done")
         self.assertEqual(self.sent, [])
+
+    async def test_host_session_and_llm_switches_prevent_build_and_model(self):
+        for method, outcome in (
+            ("is_session_enabled", "host_session_disabled"),
+            ("is_llm_enabled_for_session", "host_llm_disabled"),
+        ):
+            with self.subTest(method=method):
+                switch = getattr(self.fw.SessionServiceManager, method)
+                switch.return_value = False
+                self.assertEqual((await self.agent.run(UMO, "task", self.start)).outcome, outcome)
+                switch.return_value = True
+        self.assertEqual(self.events, [])
+
+    async def test_host_plugin_disable_prevents_build(self):
+        self.fw.sp.get_async.return_value = {
+            UMO: {"disabled_plugins": ["astrbot_plugin_heartbeat"]}
+        }
+        result = await self.agent.run(UMO, "task", self.start)
+        self.assertEqual(result.outcome, "plugin_disabled_for_session")
+        self.assertEqual(self.events, [])
+
+    async def test_session_disabled_plugins_filter_request_hooks_and_tools(self):
+        self.context.get_config = lambda **kwargs: {"plugin_set": ["*"]}
+        self.fw.sp.get_async.return_value = {UMO: {"disabled_plugins": ["excluded"]}}
+        self.fw.star_map = {
+            "good": SimpleNamespace(name="allowed"),
+            "bad": SimpleNamespace(name="excluded"),
+            "heartbeat": SimpleNamespace(name="astrbot_plugin_heartbeat"),
+        }
+        await self.agent.run(UMO, "task", self.start)
+        self.assertEqual(self.event.plugins_name, ["allowed", "astrbot_plugin_heartbeat"])
+        self.fw.filter_plugin_tools.assert_called_once_with(self.event, self.request)
+
+    async def test_revoked_while_preparing_never_enters_agent(self):
+        async def revoke(event, event_type, req):
+            self.state.sessions[UMO].enabled = False
+            return False
+
+        self.fw.call_event_hook = revoke
+        self.assertEqual(
+            (await self.agent.run(UMO, "task", self.start)).outcome, "session_disabled"
+        )
+        self.assertNotIn("agent_begin", self.events)
+        self.assertNotIn("reserve_wake", self.events)
+
+    async def test_revoked_during_wake_save_never_calls_model(self):
+        async def revoke():
+            self.state.sessions[UMO].enabled = False
+
+        result = await self.agent.run(UMO, "task", revoke)
+        self.assertEqual(result.outcome, "interrupted")
+        self.assertNotIn("agent_begin", self.events)
+
+    async def test_unlisted_session_cannot_run_with_only_an_old_state_flag(self):
+        self.settings = Settings()
+        result = await self.agent.run(UMO, "task", self.start)
+        self.assertEqual(result.outcome, "session_disabled")
+        self.assertEqual(self.events, [])
