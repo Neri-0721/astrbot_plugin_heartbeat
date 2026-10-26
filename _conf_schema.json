@@ -36,14 +36,14 @@
   "active_hours_start": {
     "title": "活跃时段（开始）",
     "type": "string",
-    "default": "08:00",
-    "hint": "HH:MM 格式"
+    "default": "00:00",
+    "hint": "HH:MM；开始与结束相同表示全天允许，不据此推断作息"
   },
   "active_hours_end": {
     "title": "活跃时段（结束）",
     "type": "string",
-    "default": "23:30",
-    "hint": "HH:MM 格式"
+    "default": "00:00",
+    "hint": "HH:MM；如确需固定时段可自行设置"
   },
   "check_last_interaction": {
     "title": "近期互动时暂停主动联系",
@@ -55,7 +55,7 @@
     "title": "互动静默阈值",
     "description": "距真实用户消息不足此分钟数时不主动联系。",
     "type": "int",
-    "default": 30,
+    "default": 10,
     "minimum": 5,
     "maximum": 1440
   },
@@ -100,15 +100,15 @@
     "title": "主动联系最小间隔（分钟）",
     "description": "与后台唤醒间隔分开；最近主动联系后先等待。",
     "type": "int",
-    "default": 240,
+    "default": 60,
     "minimum": 1,
     "maximum": 10080
   },
   "max_daily_messages": {
     "title": "每会话每日主动联系上限",
-    "description": "统计成功发送；不影响静默后台任务。",
+    "description": "成功主动联系的安全上限，不是每天应发的次数；不影响静默后台活动。",
     "type": "int",
-    "default": 3,
+    "default": 12,
     "minimum": 1,
     "maximum": 48
   },
@@ -116,7 +116,7 @@
     "title": "未回应首次退避（小时）",
     "description": "用户未回应时至少等待此时间；连续未回应依次翻倍，最多 8 倍。真实用户消息会重置未回应次数。",
     "type": "int",
-    "default": 24,
+    "default": 2,
     "minimum": 1,
     "maximum": 168
   },

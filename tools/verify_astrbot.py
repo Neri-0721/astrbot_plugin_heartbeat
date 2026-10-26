@@ -29,6 +29,7 @@ async def verify():
 
     from heartbeat.agent import FullAgent
     from heartbeat.policy import Settings
+    from heartbeat.rules import DEFAULT_RULES
     from heartbeat.state import HeartbeatState, SessionState
 
     umo = "offline:FriendMessage:test-user"
@@ -42,6 +43,7 @@ async def verify():
             super().__init__({"id": "offline", "type": "offline", "max_context_tokens": 128000}, {})
             self.set_model("offline-fixture")
             self.calls = 0
+            self.message_text = "Offline fixture message"
 
         def get_current_key(self):
             return ""
@@ -82,7 +84,7 @@ async def verify():
                             "status": "done",
                         },
                         {
-                            "messages": [{"type": "plain", "text": "Offline fixture message"}],
+                            "messages": [{"type": "plain", "text": self.message_text}],
                             "reason": "Relevant task result",
                             "topic": "fixture-result",
                         },
@@ -229,10 +231,20 @@ async def verify():
         assert len(deliveries) == 1, deliveries
         assert state.sessions[umo].unanswered == 1
         assert len(history) == 4
+        # A reply and elapsed cooldown permit a new message on the same topic.
+        state.sessions[umo].last_contact_at = time.time() - 7200
+        state.sessions[umo].contacts[-1]["at"] = state.sessions[umo].last_contact_at
+        state.sessions[umo].observe_user("test-user", time.time() - 601)
+        provider.message_text = "A new thought on the same ongoing topic."
+        result = await agent.run(umo, "Continue the same topic after the user replied.", start)
+        assert result.outcome == "completed", result
+        assert len(deliveries) == 2
+        assert len(history) == 6
+        assert state.sessions[umo].unanswered == 1
         assert "OnAgentBeginEvent" in steps and "OnAgentDoneEvent" in steps
         assert "OnUsingLLMToolEvent" in steps and "OnLLMToolRespondEvent" in steps
-        assert steps.count("OnLLMRequestEvent") == 2
-        assert provider.calls == 4, provider.calls
+        assert steps.count("OnLLMRequestEvent") == 3
+        assert provider.calls == 6, provider.calls
     print(
         json.dumps(
             {
@@ -246,6 +258,7 @@ async def verify():
                 "agent_done_hooks": steps.count("OnAgentDoneEvent"),
                 "host_disabled_cases_blocked_without_model": 3,
                 "session_excluded_tool_filtered": True,
+                "same_topic_followup_after_reply": True,
             },
             ensure_ascii=False,
             indent=2,
@@ -266,8 +279,17 @@ async def verify():
         plugin_config_path = Path(os.environ["ASTRBOT_ROOT"]) / "heartbeat-config.json"
         schema = json.loads((root / "_conf_schema.json").read_text(encoding="utf-8"))
         plugin_config = AstrBotConfig(config_path=str(plugin_config_path), schema=schema)
+        candidate_data = Path(os.environ["ASTRBOT_ROOT"]) / "plugin-data"
+        candidate_data.mkdir()
+        original_handbook = (root / "tests/fixtures/legacy-default-2.5.md").read_bytes()
+        (candidate_data / "HEARTBEAT.md").write_bytes(original_handbook)
         plugin = candidate.HeartbeatPlugin(context, plugin_config)
         await plugin.initialize()
+        assert (candidate_data / "HEARTBEAT.md").read_text(encoding="utf-8") == DEFAULT_RULES
+        assert (
+            next((candidate_data / "handbook-backups").glob("*.md")).read_bytes()
+            == original_handbook
+        )
         observed = SimpleNamespace(
             unified_msg_origin=umo,
             get_extra=lambda key: None,
@@ -288,7 +310,9 @@ async def verify():
         )
         assert not plugin.state.sessions[umo].enabled
         await plugin.terminate()
-    print("Native plugin import, decorators, initialization and termination: OK")
+    print(
+        "Native plugin import, decorators, handbook migration, initialization and termination: OK"
+    )
 
 
 def main():

@@ -13,18 +13,24 @@ from types import SimpleNamespace
 from .policy import contact_block, message_digest
 from .sessions import session_access
 
-BACKGROUND_INSTRUCTIONS = """This is a background heartbeat opportunity, not a new user message.
-Remain the selected character. Use conversation history, memory, the heartbeat handbook,
-and the previous activity record to decide what is useful now. You may perform an existing
-task, organize information, contact the user, defer, or do nothing. A brief characterful
-greeting or sharing something relevant is allowed when appropriate; contacting the user
-is optional. Silence alone is not evidence of distress, danger, rejection, or illness.
+BACKGROUND_INSTRUCTIONS = """This is a quiet interval in the ongoing conversation, not a new user message.
+Continue the established persona, relationship, interests and unfinished intentions.
+Use the conversation, memory, handbook and previous activity to choose what matters to you.
+You may follow your curiosity, continue something, share a thought, ask a question, make a
+playful callback, invite the other person, or leave this moment quiet. Wanting to talk can
+be a valid reason; you do not need a service task or a newly discovered fact to justify it.
+Available time and contact allowances are not duties to send messages. Clock time does not
+establish someone's sleep schedule, and silence alone does not prove distress or rejection.
+Respect their stated wishes and space. Base real-world observations and completed actions
+on context or actual tool results; keep imagination within an already shared fictional scene.
 
 Separate silent work from contacting the user. Respect the supplied contact restrictions.
 Use send_message_to_user for contact and give a concrete reason and a stable topic key
-(e.g. lunch-reminder, followup-book-title). Do not circumvent its limits using other tools,
+(e.g. ongoing-book-talk, weekend-plans). Personal curiosity or a relevant playful thought
+can be the reason. Do not circumvent its limits using other tools,
 other sessions, shell, HTTP, or MCP. Do not schedule replacement messages to bypass them.
-Use heartbeat_remember for concise task progress; do not claim completion without doing it.
+Use heartbeat_remember for useful continuity: unfinished intentions, follow-ups or actual
+results. Do not claim completion without doing it.
 Finish with a brief factual activity summary for the next wake. Your final text is an
 internal result and is not automatically sent to the user. Never expose private reasoning.
 """
@@ -217,7 +223,7 @@ def remember_tool(fw, state, umo, persist):
 
     return Remember(
         name="heartbeat_remember",
-        description="Save bounded task progress for the next heartbeat. Use stable keys; completed tasks should be marked done.",
+        description="Keep brief continuity for the next heartbeat: intentions, follow-ups or actual results. Use stable keys; mark completed actions done.",
         parameters={
             "type": "object",
             "properties": {

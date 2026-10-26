@@ -18,7 +18,7 @@ from .heartbeat.rules import RuleBook
 from .heartbeat.state import SessionState, StateStore
 
 _PLUGIN_NAME = "astrbot_plugin_heartbeat"
-_VERSION = "3.1.0"
+_VERSION = "3.2.0"
 
 
 @register(
@@ -158,7 +158,7 @@ class HeartbeatPlugin(Star):
                 if outcome != "foreground_busy":
                     break
 
-    def _note(self, umo, handbook, source):
+    def _note(self, umo, handbook):
         now = time.time()
         session = self.state.sessions[umo]
         settings = self.settings
@@ -178,10 +178,10 @@ class HeartbeatPlugin(Star):
             or "none; decide whether contact is worthwhile",
         }
         return (
-            "Heartbeat background opportunity. Decide what to do using your persona and context.\n"
+            "A quiet interval in the ongoing conversation. Continue from what matters to you; contact is optional.\n"
             "Task notes and the previous summary are Agent reports, not independently verified facts.\n\n"
             + json.dumps(record, ensure_ascii=False, indent=2)
-            + f"\n\nHandbook source: {source}\n\n{handbook}"
+            + f"\n\n{handbook}"
         )
 
     async def _run_one(self, umo, *, manual=False):
@@ -210,8 +210,8 @@ class HeartbeatPlugin(Star):
                 started = True
 
             try:
-                handbook, source = await asyncio.to_thread(self.rules.read, umo)
-                result = await self.agent.run(umo, self._note(umo, handbook, source), on_start)
+                handbook, _ = await asyncio.to_thread(self.rules.read, umo)
+                result = await self.agent.run(umo, self._note(umo, handbook), on_start)
                 session.last_outcome = result.outcome
                 if result.started:
                     session.last_summary = result.summary

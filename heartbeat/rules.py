@@ -3,10 +3,47 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+import tempfile
 from pathlib import Path
 
 DEFAULT_RULES = """# HEARTBEAT.md
+
+这是你可以自由安排的一段空当。最近的交谈、答应的事和你自己在意的东西，都还接着。
+
+想想刚才有什么让你惦记、好奇、想接着聊的，或者有什么没做完、值得继续的事。你可以顺着自己的兴趣查点东西、继续一件事，也可以暂时什么都不做。
+
+如果有话想对对方说，就从你们真正聊过、经历过的事情接下去。可以分享想法、问个问题、接一句玩笑、邀请一起做点什么，或者只是有来由地想找对方说句话。不必等到能提供帮助，也不必每次都关心、提醒、安慰或总结。
+
+怎么说、说多少，顺着你的性格、你们的关系和眼前这件事来。没有固定问候台词，也没有必须完成的聊天次数。
+
+钟点只是背景，不替对方决定作息。对方可能早起，也可能晚睡；吃饭、休息这类话题，来自你们的实际约定和正在聊的事情。已经说了想独处、休息或暂时别联系，就尊重这段空间；连续没有回应时，给对方留些余地。
+
+分清已经发生的事、接下来想做的事和共同情境里的想象。外部消息和实际行动以你确实知道、查到或做过的为准。
+
+有值得下次接着的话题、打算或进展，就简短记住。没有想说的话时，让这段空当安静过去。
+"""
+
+
+LEGACY_DEFAULT_RULES = (
+    """# HEARTBEAT.md
+
+你是被定时任务唤醒的，不是用户主动找你。
+
+## 规则
+- [12:00-13:00] 提醒吃午饭
+- [18:00-19:00] 问候晚饭
+- [22:00之后] 提醒休息
+- 距上次对话 > 4h → 自然问候
+- 距上次对话 < 30 分钟 → 不要打扰
+
+## 约束
+- 不要解释"被定时唤醒"
+- 问候不超过 25 字
+- 没事做 → 什么都不做，结束
+""",
+    """# HEARTBEAT.md
 
 这是一次后台自主活动机会，不是用户的新消息。保持当前人格，结合对话与记忆决定做什么。
 
@@ -25,7 +62,16 @@ DEFAULT_RULES = """# HEARTBEAT.md
 ## 连续性
 - 用 heartbeat_remember 保存待办或简短进度，完成后将 status 设为 done。
 - 结束时简述实际行动和结果；这份摘要用于下次后台活动，不会自动发给用户。
-"""
+""",
+)
+
+
+def _normalized(text: str) -> str:
+    return text.lstrip("\ufeff").replace("\r\n", "\n").strip()
+
+
+def _is_legacy_default(text: str) -> bool:
+    return any(_normalized(text) == _normalized(old) for old in LEGACY_DEFAULT_RULES)
 
 
 class RuleBook:
@@ -38,6 +84,43 @@ class RuleBook:
         path = self.data_dir / "HEARTBEAT.md"
         if not path.exists():
             path.write_text(DEFAULT_RULES, encoding="utf-8")
+        elif path.stat().st_size <= 65536:
+            original = path.read_bytes()
+            try:
+                text = original.decode("utf-8-sig")
+            except UnicodeError:
+                return  # An unreadable custom handbook still fails explicitly when selected.
+            if _is_legacy_default(text):
+                self._upgrade_default(path, original)
+
+    def _upgrade_default(self, path: Path, original: bytes):
+        backups = self.data_dir / "handbook-backups"
+        backups.mkdir(exist_ok=True)
+        backup = backups / (hashlib.sha256(original).hexdigest() + ".md")
+        try:
+            with backup.open("xb") as stream:
+                stream.write(original)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except FileExistsError:
+            if backup.read_bytes() != original:
+                raise ValueError("Legacy handbook backup does not match; migration stopped")
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=path.parent, delete=False
+            ) as stream:
+                temporary = stream.name
+                stream.write(DEFAULT_RULES)
+                stream.flush()
+                os.fsync(stream.fileno())
+            if path.read_bytes() != original:
+                raise ValueError("Handbook changed during migration; original left untouched")
+            os.replace(temporary, path)
+            temporary = None
+        finally:
+            if temporary is not None:
+                Path(temporary).unlink(missing_ok=True)
 
     def session_path(self, umo: str) -> Path:
         key = hashlib.sha256(umo.encode()).hexdigest()
@@ -73,22 +156,7 @@ class RuleBook:
         global_path = self.data_dir / "HEARTBEAT.md"
         if global_path.exists() and body == self._read(global_path).strip():
             return True
-        legacy_default = """# HEARTBEAT.md
-
-你是被定时任务唤醒的，不是用户主动找你。
-
-## 规则
-- [12:00-13:00] 提醒吃午饭
-- [18:00-19:00] 问候晚饭
-- [22:00之后] 提醒休息
-- 距上次对话 > 4h → 自然问候
-- 距上次对话 < 30 分钟 → 不要打扰
-
-## 约束
-- 不要解释"被定时唤醒"
-- 问候不超过 25 字
-- 没事做 → 什么都不做，结束"""
-        return body == legacy_default
+        return _is_legacy_default(body)
 
     @staticmethod
     def _read(path: Path) -> str:

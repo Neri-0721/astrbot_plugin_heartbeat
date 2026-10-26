@@ -4,6 +4,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from heartbeat.rules import DEFAULT_RULES, RuleBook
 from heartbeat.state import HeartbeatState, SessionState, StateStore
@@ -155,3 +156,63 @@ class RuleTests(unittest.TestCase):
         path.write_text("my original rules", encoding="utf-8")
         self.book.initialize()
         self.assertEqual(path.read_text(encoding="utf-8"), "my original rules")
+
+    def test_old_shipped_defaults_are_backed_up_byte_for_byte_and_migrated_once(self):
+        fixtures = Path(__file__).parent / "fixtures"
+        for version in ("2.5", "3.1"):
+            for windows in (False, True):
+                with (
+                    self.subTest(version=version, windows=windows),
+                    tempfile.TemporaryDirectory() as tmp,
+                ):
+                    root = Path(tmp)
+                    old = (
+                        (fixtures / f"legacy-default-{version}.md")
+                        .read_bytes()
+                        .replace(b"\r\n", b"\n")
+                    )
+                    if windows:
+                        old = b"\xef\xbb\xbf" + old.replace(b"\n", b"\r\n")
+                    path = root / "HEARTBEAT.md"
+                    path.write_bytes(old)
+                    book = RuleBook(root, {})
+                    book.initialize()
+                    self.assertEqual(book.read(self.umo)[0], DEFAULT_RULES)
+                    backups = list((root / "handbook-backups").glob("*.md"))
+                    self.assertEqual(len(backups), 1)
+                    self.assertEqual(backups[0].read_bytes(), old)
+                    book.initialize()
+                    self.assertEqual(list((root / "handbook-backups").glob("*.md")), backups)
+
+    def test_old_default_with_a_personal_edit_is_not_replaced(self):
+        old = (Path(__file__).parent / "fixtures/legacy-default-2.5.md").read_text(encoding="utf-8")
+        customized = old + "\n我已经单独约好了周末的事情。\n"
+        path = self.root / "HEARTBEAT.md"
+        path.write_text(customized, encoding="utf-8")
+        self.book.initialize()
+        self.assertEqual(path.read_text(encoding="utf-8"), customized)
+        self.assertFalse((self.root / "handbook-backups").exists())
+
+    def test_inherited_platform_copy_follows_migrated_global_without_being_overwritten(self):
+        old = (Path(__file__).parent / "fixtures/legacy-default-2.5.md").read_text(encoding="utf-8")
+        (self.root / "HEARTBEAT.md").write_text(old, encoding="utf-8")
+        platform = self.root / "heartbeat.d/qq.md"
+        platform.parent.mkdir()
+        copy = "> 自动生成，编辑全局 HEARTBEAT.md 或直接修改此文件。\n\n" + old
+        platform.write_text(copy, encoding="utf-8")
+        self.book.initialize()
+        self.assertEqual(self.book.read(self.umo)[0], DEFAULT_RULES)
+        self.assertEqual(platform.read_text(encoding="utf-8"), copy)
+
+    def test_failed_atomic_replacement_preserves_original_and_backup(self):
+        old = (Path(__file__).parent / "fixtures/legacy-default-2.5.md").read_bytes()
+        path = self.root / "HEARTBEAT.md"
+        path.write_bytes(old)
+        with patch("heartbeat.rules.os.replace", side_effect=PermissionError("file busy")):
+            with self.assertRaises(PermissionError):
+                self.book.initialize()
+        self.assertEqual(path.read_bytes(), old)
+        self.assertEqual(next((self.root / "handbook-backups").glob("*.md")).read_bytes(), old)
+        self.assertEqual(
+            {p.name for p in self.root.iterdir()}, {"HEARTBEAT.md", "handbook-backups"}
+        )

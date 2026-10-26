@@ -38,16 +38,16 @@ class Settings:
     interval_minutes: int = 90
     startup_behavior: str = "auto"
     target_mode: str = "all"
-    active_hours_start: str = "08:00"
-    active_hours_end: str = "23:30"
+    active_hours_start: str = "00:00"
+    active_hours_end: str = "00:00"
     background_outside_active_hours: bool = False
     check_last_interaction: bool = True
-    interaction_threshold_minutes: int = 30
+    interaction_threshold_minutes: int = 10
     max_daily_heartbeats: int = 48
     cooldown_seconds: int = 120
-    contact_cooldown_minutes: int = 240
-    max_daily_messages: int = 3
-    unanswered_backoff_hours: int = 24
+    contact_cooldown_minutes: int = 60
+    max_daily_messages: int = 12
+    unanswered_backoff_hours: int = 2
     agent_timeout_seconds: int = 300
     allow_group_sessions: bool = False
     timezone: str = ""
@@ -198,8 +198,6 @@ def contact_block(
         if now - session.last_contact_at < wait:
             return "unanswered_backoff" if session.unanswered else "contact_cooldown"
     for contact in session.contacts:
-        if contact["day"] == day and (
-            (topic and contact["topic"] == topic) or (digest and contact["digest"] == digest)
-        ):
+        if contact["day"] == day and digest and contact["digest"] == digest:
             return "already_contacted_today"
     return ""

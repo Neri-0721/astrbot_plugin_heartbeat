@@ -2,7 +2,7 @@ name: astrbot_plugin_heartbeat
 display_name: 心跳助手 (Heartbeat)
 short_desc: 按会话明确开启，定期唤醒完整 Agent，自主做事或有分寸地联系用户。
 desc: 为当前会话的角色提供周期性后台活动机会，延续任务和行动记录。支持多会话公平调度、独立手册、联系去重、未回应退避与持久化预算。复用 AstrBot 完整 Agent 并调用请求前钩子；实际工具与记忆能力取决于已启用的配置和插件。
-version: 3.1.0
+version: 3.2.0
 author: Neri0721
 repo: https://github.com/Neri-0721/astrbot_plugin_heartbeat
 astrbot_version: ">=4.25.1,<5"

@@ -79,7 +79,7 @@ class PolicyTests(unittest.TestCase):
         )
 
     def test_unanswered_contacts_back_off_without_escalating(self):
-        self.session.last_contact_at = NOW - 25 * 3600
+        self.session.last_contact_at = NOW - 3 * 3600
         self.session.unanswered = 1
         self.assertEqual(self.contact(), "")
         self.session.unanswered = 2
@@ -88,12 +88,12 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(self.session.unanswered, 0)
         self.assertEqual(self.contact(), "")
 
-    def test_daily_topic_and_exact_message_dedup_survive_user_reply(self):
+    def test_reply_allows_same_topic_but_not_identical_message(self):
         self.session.record_contact(
             NOW - 20000, self.settings.day(NOW), "lunch", "digest", "reason"
         )
         self.session.observe_user("1", NOW - 3600)
-        self.assertEqual(self.contact(topic="lunch"), "already_contacted_today")
+        self.assertEqual(self.contact(topic="lunch"), "")
         self.assertEqual(self.contact(topic="changed", digest="digest"), "already_contacted_today")
 
     def test_separate_wake_and_message_budgets(self):
@@ -103,8 +103,37 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(self.contact(), "")
         self.state.wake_count = 0
         self.session.contacts = [{"day": self.settings.day(NOW)}] * 3
+        self.assertEqual(self.contact(), "")
+        self.session.contacts *= 4
         self.assertEqual(self.contact(), "message_budget")
         self.assertEqual(wake_block(self.state, UMO, self.settings, NOW), "")
+
+    def test_default_allows_early_morning_and_late_night(self):
+        for hour, minute in ((4, 30), (23, 50)):
+            now = datetime(2026, 10, 26, hour, minute, tzinfo=timezone.utc).timestamp()
+            self.session.last_user_at = now - 3600
+            with self.subTest(hour=hour):
+                self.assertEqual(wake_block(self.state, UMO, self.settings, now), "")
+                self.assertEqual(
+                    contact_block(
+                        self.session, self.settings, now, started_user_at=self.session.last_user_at
+                    ),
+                    "",
+                )
+
+    def test_fifteen_minutes_after_chat_does_not_force_another_silent_half_hour(self):
+        self.session.last_user_at = NOW - 15 * 60
+        self.assertEqual(self.contact(), "")
+
+    def test_unanswered_wait_grows_from_two_to_sixteen_hours(self):
+        self.session.last_user_at = NOW - 30 * 3600
+        for count, hours in ((1, 2), (2, 4), (3, 8), (4, 16)):
+            self.session.unanswered = count
+            self.session.last_contact_at = NOW - hours * 3600 + 1
+            with self.subTest(count=count):
+                self.assertEqual(self.contact(), "unanswered_backoff")
+                self.session.last_contact_at -= 1
+                self.assertEqual(self.contact(), "")
 
     def test_midnight_uses_configured_timezone(self):
         near_midnight = datetime(2026, 10, 26, 0, 30, tzinfo=timezone.utc).timestamp()
