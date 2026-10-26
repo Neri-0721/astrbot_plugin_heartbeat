@@ -65,7 +65,7 @@ async def verify():
                 for m in kwargs.get("contexts", [])
             ]
             system = str(messages[0].get("content"))
-            assert "天使酱" in system, "Selected persona was not injected"
+            assert "OFFLINE_PERSONA_MARKER" in system, "Selected persona was not injected"
             assert "OFFLINE_MEMORY_MARKER" in system, "Request hook did not run before reset"
             if self.calls % 2:
                 return LLMResponse(
@@ -100,12 +100,21 @@ async def verify():
             return cls()
 
     async def resolve_persona(**kwargs):
-        return "angel", {"prompt": "你是天使酱。", "tools": None, "skills": []}, [], False
+        return (
+            "test-persona",
+            {
+                "prompt": "You are a test assistant. Persona: OFFLINE_PERSONA_MARKER.",
+                "tools": None,
+                "skills": [],
+            },
+            [],
+            False,
+        )
 
     async def get_conv(*args, **kwargs):
         return SimpleNamespace(
             cid="offline-conversation",
-            persona_id="angel",
+            persona_id="test-persona",
             history=json.dumps(history),
             token_usage=0,
         )

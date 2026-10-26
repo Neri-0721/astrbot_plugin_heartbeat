@@ -1,6 +1,6 @@
 # 心跳助手（Heartbeat）
 
-为会话里的角色提供周期性的后台活动机会。她收到手册和近期状态后，可以继续任务、整理信息、联系用户，也可以安静结束。
+为会话里的角色提供周期性的后台活动机会。Agent 根据任务手册和近期状态，可以继续任务、整理信息、联系用户，也可以安静结束。
 
 这是一个周期唤醒、逐轮衔接的决策循环。模型在两轮之间不会持续运行；每轮仍使用 AstrBot 的完整主 Agent、当前会话的人格、已启用的工具与 Skills。实际能力取决于会话配置和已安装插件。
 
@@ -111,7 +111,7 @@ last_session.json             旧版恢复文件，迁移后保留原文件
 手册是交给 Agent 理解的自然语言，不是由 Python 执行的规则脚本。示例：
 
 ```markdown
-保持天使酱的人格。每次醒来先看已有任务和上次行动结果。
+保持当前会话配置的人格。每次醒来先看已有任务和上次行动结果。
 - 如果还有未完成的阅读任务，可以继续整理；不要为了报告进度打扰用户。
 - 如果有与最近话题相关的新信息，可以决定是否分享。
 - 没有合适的事情时，安静结束。
@@ -140,6 +140,6 @@ python tools/verify_astrbot.py --source /path/to/AstrBot
 
 发布遵循 [AstrBot 开发指南](https://docs.astrbot.app/dev/star/plugin-new.html)、[发布说明](https://docs.astrbot.app/dev/star/plugin-publish.html)和[市场身份规范](https://docs.astrbot.app/dev/plugin-market/2026-06-27.html)。保持作者/名称身份与市场记录一致；提交前通过 Ruff 两项检查；发布包小于 16 MB，不包含用户数据、日志、缓存或虚拟环境。
 
-## 许可证与原型署名
+## 许可证与贡献者
 
-[AGPL-3.0](LICENSE)。保留原型仓库署名：Built with ❤️ by Key for Neri0721。
+[AGPL-3.0](LICENSE)。作者：Neri0721；原型贡献者：Key。

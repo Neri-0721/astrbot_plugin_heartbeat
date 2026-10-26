@@ -20,4 +20,4 @@
 5. 全局取消调度会持久化；普通聊天和重启不会重新开启。全局调度命令需要 AstrBot 管理员权限。
 6. `/heartbeat_test` 只略过到期时间，仍遵守其他限制；刚发送测试命令时，通常只会执行静默任务。
 7. 新状态文件写入后，降级到 2.5.0 不会读取 v3 的预算和控制状态。旧文件仍保留，降级前应自行保存需要的状态。
-8. 插件 identity 保持 `Neri0721/astrbot_plugin_heartbeat`。代码注册作者由 Key 统一为 Neri0721，原型署名保留在 README；版本为 `3.0.0`。
+8. 插件 identity 保持 `Neri0721/astrbot_plugin_heartbeat`。代码注册作者由 Key 统一为 Neri0721，原型贡献者署名保留在 README；版本为 `3.0.0`。
