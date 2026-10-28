@@ -46,7 +46,9 @@ def load_framework():
         _plugin_tool_fix,
         build_main_agent,
     )
+    from astrbot.core.config.agent_runner import resolve_context_compression_config
     from astrbot.core.cron.events import CronMessageEvent
+    from astrbot.core.message.message_event_result import MessageChain
     from astrbot.core.pipeline.context_utils import call_event_hook
     from astrbot.core.platform.astrbot_message import MessageMember
     from astrbot.core.platform.message_session import MessageSession
@@ -60,9 +62,11 @@ def load_framework():
         FunctionTool=FunctionTool,
         ToolSet=ToolSet,
         MainAgentBuildConfig=MainAgentBuildConfig,
+        resolve_compression=resolve_context_compression_config,
         get_session_conv=_get_session_conv,
         build_main_agent=build_main_agent,
         CronMessageEvent=CronMessageEvent,
+        MessageChain=MessageChain,
         MessageMember=MessageMember,
         MessageSession=MessageSession,
         ProviderRequest=ProviderRequest,
@@ -74,6 +78,38 @@ def load_framework():
         star_map=star_map,
         filter_plugin_tools=_plugin_tool_fix,
     )
+
+
+def build_options(fw, cfg, timezone):
+    """Translate both the old and the structured host config at one seam."""
+    settings = dict(cfg.get("provider_settings", {}))
+    allowed = {f.name for f in fields(fw.MainAgentBuildConfig)}
+    options = {k: v for k, v in settings.items() if k in allowed}
+    runner = cfg.get("agent_runner", {}).get("config", {})
+    if runner:
+        misc = runner.get("misc", {})
+        persona = runner.get("persona", {})
+        model = runner.get("model", {})
+        options.update({k: v for k, v in misc.items() if k in allowed})
+        options.update(fw.resolve_compression(runner.get("compression", {})))
+        options.update(
+            llm_safety_mode=persona.get("safety_mode", True),
+            safety_mode_strategy=persona.get("safety_mode_strategy", "system_prompt"),
+            fallback_provider_ids=model.get("fallback_provider_ids", []),
+            request_max_retries=model.get("request_max_retries", 5),
+        )
+        settings["default_personality"] = persona.get("persona_id", "default")
+    options.update(
+        tool_call_timeout=runner.get("misc", {}).get(
+            "tool_call_timeout", settings.get("tool_call_timeout", 120)
+        ),
+        streaming_response=False,
+        provider_settings=settings,
+        timezone=timezone or None,
+        kb_agentic_mode=cfg.get("kb_agentic_mode", False),
+        subagent_orchestrator=cfg.get("subagent_orchestrator", {}),
+    )
+    return {k: v for k, v in options.items() if k in allowed}
 
 
 @dataclass
@@ -237,12 +273,13 @@ def remember_tool(fw, state, umo, persist):
 
 
 class FullAgent:
-    def __init__(self, context, state, get_settings, persist):
+    def __init__(self, context, state, get_settings, persist, *, journal=None):
         self.context = context
         self.state = state
         self.get_settings = get_settings
         self.persist = persist
         self.runners = {}
+        self.journal = journal
 
     def interrupt(self, umo):
         if runner := self.runners.get(umo):
@@ -277,6 +314,10 @@ class FullAgent:
             await lock.__aexit__(None, None, None)
 
     async def _run_locked(self, fw, umo, note, on_start):
+        if self.get_settings().execution_mode == "gated":
+            from .gated import run_gated
+
+            return await run_gated(self, fw, umo, note, on_start)
         session = self.state.sessions[umo]
         gate = ContactGate(self.state, umo, self.get_settings, self.persist, access=self.access)
         context = self.context
@@ -321,16 +362,9 @@ class FullAgent:
         if blocked:
             return RunResult(outcome=blocked)
         provider_settings = cfg.get("provider_settings", {})
-        allowed = {f.name for f in fields(fw.MainAgentBuildConfig)}
-        options = {k: v for k, v in provider_settings.items() if k in allowed}
-        options.update(
-            tool_call_timeout=provider_settings.get("tool_call_timeout", 120),
-            streaming_response=False,
-            provider_settings=provider_settings,
-            timezone=self.get_settings().timezone or None,
-            kb_agentic_mode=cfg.get("kb_agentic_mode", False),
+        build_config = fw.MainAgentBuildConfig(
+            **build_options(fw, cfg, self.get_settings().timezone)
         )
-        build_config = fw.MainAgentBuildConfig(**options)
         conv = await fw.get_session_conv(event=event, plugin_context=context)
         req = fw.ProviderRequest(
             prompt=note,
@@ -383,7 +417,13 @@ class FullAgent:
                 return RunResult(
                     started=True, outcome="interrupted", summary="Stopped before model step"
                 )
-            async for _ in runner.step_until_done(provider_settings.get("max_agent_step", 30)):
+            max_steps = (
+                cfg.get("agent_runner", {})
+                .get("config", {})
+                .get("misc", {})
+                .get("max_steps", provider_settings.get("max_agent_step", 30))
+            )
+            async for _ in runner.step_until_done(max_steps):
                 if (
                     self.state.paused
                     or session.last_user_at > gate.started_user_at

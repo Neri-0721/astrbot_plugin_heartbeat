@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -28,6 +29,7 @@ async def verify():
     from astrbot.core.star.star import StarMetadata, star_map
 
     from heartbeat.agent import FullAgent
+    from heartbeat.journal import DecisionJournal
     from heartbeat.policy import Settings
     from heartbeat.rules import DEFAULT_RULES
     from heartbeat.state import HeartbeatState, SessionState
@@ -144,6 +146,9 @@ async def verify():
         deliveries.append(str(session))
         return True
 
+    async def using_provider(**kwargs):
+        return provider
+
     cfg = {
         "plugin_set": ["*"],
         "admins_id": [],
@@ -154,6 +159,7 @@ async def verify():
     context.__dict__.update(
         get_config=lambda **kwargs: cfg,
         get_using_provider=lambda **kwargs: provider,
+        get_using_provider_async=using_provider,
         get_llm_tool_manager=lambda: ToolManager(),
         persona_manager=SimpleNamespace(resolve_selected_persona=resolve_persona),
         subagent_orchestrator=None,
@@ -245,6 +251,88 @@ async def verify():
         assert "OnUsingLLMToolEvent" in steps and "OnLLMToolRespondEvent" in steps
         assert steps.count("OnLLMRequestEvent") == 3
         assert provider.calls == 6, provider.calls
+
+    # Exercise the new path using native events, ProviderRequest, MessageChain and
+    # the same session controls. Providers are fixtures; there is no network client.
+    class DecisionProvider(OfflineProvider):
+        def __init__(self, stage):
+            super().__init__()
+            self.stage = stage
+            self.action = "quiet"
+
+        def meta(self):
+            return ProviderMeta(id=self.stage, model=self.get_model(), type="offline")
+
+        async def text_chat(self, **kwargs):
+            self.calls += 1
+            assert kwargs["func_tool"] is None
+            assert "OFFLINE_PERSONA_MARKER" in kwargs["system_prompt"]
+            assert "OFFLINE_MEMORY_MARKER" in kwargs["system_prompt"]
+            assert all("[Heartbeat " not in m["content"] for m in kwargs["contexts"])
+            if self.stage == "gate":
+                text = {
+                    "action": self.action,
+                    "reason": "Continue a shared joke",
+                    "topic": "shared-joke" if self.action == "contact" else "",
+                    "intent": "A playful callback" if self.action == "contact" else "",
+                    "summary": "Keep the unfinished thought",
+                    "notes": [],
+                }
+            else:
+                text = {"action": "send", "message": "A fixture continuation"}
+            return LLMResponse(role="assistant", completion_text=json.dumps(text))
+
+    gate_provider = DecisionProvider("gate")
+    expression_provider = DecisionProvider("expression")
+    context.get_provider_by_id = lambda key: {
+        "gate": gate_provider,
+        "expression": expression_provider,
+    }.get(key)
+    settings = replace(
+        settings,
+        execution_mode="gated",
+        gate_provider_id="gate",
+        expression_provider_id="expression",
+    )
+    gated = FullAgent(
+        context,
+        state,
+        lambda: settings,
+        save,
+        journal=DecisionJournal(Path(os.environ["ASTRBOT_ROOT"]) / "gated-records"),
+    )
+    history_before = list(history)
+    delivery_before = len(deliveries)
+    with patch("astrbot.core.pipeline.context_utils.call_event_hook", side_effect=hook):
+        result = await gated.run(umo, "A quiet interval", start)
+        assert result.outcome == "quiet", result
+        assert gate_provider.calls == 1 and expression_provider.calls == 0
+        assert history == history_before
+        gate_provider.action = "contact"
+        state.sessions[umo].observe_user("test-user", time.time() - 30)
+        result = await gated.run(umo, "Continue the joke if welcome", start)
+        assert result.outcome == "contacted", result
+        assert gate_provider.calls == 2 and expression_provider.calls == 1
+        assert len(deliveries) == delivery_before + 1
+        assert history[-1] == {"role": "assistant", "content": "A fixture continuation"}
+        state.sessions[umo].quiet_until = time.time() + 3600
+        result = await gated.run(umo, "Respect explicit quiet", start)
+        assert "user_quiet_period" in result.outcome, result
+        assert gate_provider.calls == 3 and expression_provider.calls == 1
+    print(
+        json.dumps(
+            {
+                "gated_fixture_calls": gate_provider.calls,
+                "expression_fixture_calls": expression_provider.calls,
+                "gated_real_network_calls": 0,
+                "gated_native_events_hooks_and_message_chain": True,
+                "quiet_without_expression": True,
+                "recent_chat_is_not_a_hard_block": True,
+                "explicit_quiet_skips_expression": True,
+            },
+            indent=2,
+        )
+    )
     print(
         json.dumps(
             {

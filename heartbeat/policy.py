@@ -19,6 +19,8 @@ LIMITS = {
     "max_daily_messages": (1, 48),
     "unanswered_backoff_hours": (1, 168),
     "agent_timeout_seconds": (10, 1800),
+    "gate_history_messages": (2, 200),
+    "gate_history_chars": (2000, 200000),
 }
 
 
@@ -34,6 +36,11 @@ def clock_minutes(value: str) -> int:
 
 @dataclass(frozen=True)
 class Settings:
+    execution_mode: str = "full_agent"
+    gate_provider_id: str = ""
+    expression_provider_id: str = ""
+    gate_history_messages: int = 24
+    gate_history_chars: int = 32000
     enabled_sessions: tuple[str, ...] = ()
     interval_minutes: int = 90
     startup_behavior: str = "auto"
@@ -95,6 +102,8 @@ class Settings:
             raise ValueError("startup_behavior must be auto or on_interaction")
         if values["target_mode"] not in {"all", "last"}:
             raise ValueError("target_mode must be all or last")
+        if values["execution_mode"] not in {"full_agent", "gated"}:
+            raise ValueError("execution_mode must be full_agent or gated")
         clock_minutes(values["active_hours_start"])
         clock_minutes(values["active_hours_end"])
         values["timezone"] = values["timezone"] or fallback_timezone
@@ -181,14 +190,15 @@ def contact_block(
     if not settings.in_hours(now):
         return "outside_contact_hours"
     if (
-        settings.check_last_interaction
+        settings.execution_mode != "gated"
+        and settings.check_last_interaction
         and now - session.last_user_at < settings.interaction_threshold_minutes * 60
     ):
         return "recent_user_interaction"
     day = settings.day(now)
     if sum(c["day"] == day for c in session.contacts) >= settings.max_daily_messages:
         return "message_budget"
-    if session.last_contact_at:
+    if session.last_contact_at and settings.execution_mode != "gated":
         wait = settings.contact_cooldown_minutes * 60
         if session.unanswered:
             wait = max(

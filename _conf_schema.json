@@ -1,4 +1,39 @@
 {
+  "execution_mode": {
+    "title": "后台执行方式",
+    "description": "gated = 指定模型单次决策，只有需要联系才调用表达模型；full_agent = 原完整 Agent/工具循环。升级不自动切换已有用户。",
+    "type": "string",
+    "options": ["gated", "full_agent"],
+    "default": "full_agent"
+  },
+  "gate_provider_id": {
+    "title": "门控模型提供商 ID",
+    "description": "填写 AstrBot 中完整的文本模型提供商 ID。仅门控模式使用；未指定、不可用或返回无效决策时停止，不自动回退到表达模型。",
+    "type": "string",
+    "default": ""
+  },
+  "expression_provider_id": {
+    "title": "表达模型提供商 ID（可选）",
+    "description": "留空跟随当前会话选择的模型；仅在门控决定联系且允许发送时调用一次。门控和表达均不提供工具，也不追加模型总结调用。",
+    "type": "string",
+    "default": ""
+  },
+  "gate_history_messages": {
+    "title": "门控近期消息条数",
+    "description": "两个阶段共用的近期对话条数；保留完整人格，过滤旧 heartbeat 内部总结。历史图片/音频仅保留未观察到内容的占位，不另调视觉模型。",
+    "type": "int",
+    "default": 24,
+    "minimum": 2,
+    "maximum": 200
+  },
+  "gate_history_chars": {
+    "title": "门控近期对话字符上限",
+    "description": "近期文本超限时从最早部分裁剪，两个阶段使用同一份历史。此限制不裁剪人格，也不触发额外的压缩模型请求。",
+    "type": "int",
+    "default": 32000,
+    "minimum": 2000,
+    "maximum": 200000
+  },
   "enabled_sessions": {
     "title": "开启心跳的会话",
     "description": "仅这些完整会话 ID 可运行心跳，默认空列表全部关闭；不支持通配符。用 /heartbeat_status 获取当前 ID，或用 /heartbeat_enable、/heartbeat_disable 直接修改此名单并保存。配置中添加的新会话需收到真实消息以取得运行信息。保存后重载插件，或由管理员执行 /heartbeat_reschedule 应用。",
@@ -47,7 +82,7 @@
   },
   "check_last_interaction": {
     "title": "近期互动时暂停主动联系",
-    "description": "近期有用户消息时限制主动发送，后台仍可静默执行任务。前台 Agent 正在运行时，本轮后台让行。",
+    "description": "完整 Agent 模式：近期用户消息限制主动发送。门控模式：仅提供时间参考，由模型判断是否适合延续交流。两种模式在前台占用会话锁时均让行。",
     "type": "bool",
     "default": true
   },
@@ -98,7 +133,7 @@
   },
   "contact_cooldown_minutes": {
     "title": "主动联系最小间隔（分钟）",
-    "description": "与后台唤醒间隔分开；最近主动联系后先等待。",
+    "description": "完整 Agent 模式为发送限制；门控模式仅为通常联系间隔参考，不机械拦截合理的接续交流。",
     "type": "int",
     "default": 60,
     "minimum": 1,
@@ -114,7 +149,7 @@
   },
   "unanswered_backoff_hours": {
     "title": "未回应首次退避（小时）",
-    "description": "用户未回应时至少等待此时间；连续未回应依次翻倍，最多 8 倍。真实用户消息会重置未回应次数。",
+    "description": "完整 Agent 模式按 1/2/4/8 倍退避；门控模式只把未回应次数和等待建议交给模型。真实用户消息会重置未回应次数。",
     "type": "int",
     "default": 2,
     "minimum": 1,

@@ -25,6 +25,7 @@ class SessionState:
     unanswered: int = 0
     last_outcome: str = ""
     last_summary: str = ""
+    last_decision_id: str = ""
     contacts: list[dict] = field(default_factory=list)
     notes: dict[str, dict] = field(default_factory=dict)
 

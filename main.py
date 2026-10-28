@@ -13,17 +13,16 @@ from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, StarTools, register
 
 from .heartbeat.agent import FullAgent
+from .heartbeat.journal import DecisionJournal
 from .heartbeat.policy import Settings, candidate_sessions, contact_block, wake_block
 from .heartbeat.rules import RuleBook
 from .heartbeat.state import SessionState, StateStore
 
 _PLUGIN_NAME = "astrbot_plugin_heartbeat"
-_VERSION = "3.2.0"
+_VERSION = "3.3.0"
 
 
-@register(
-    _PLUGIN_NAME, "Neri0721", "周期唤醒完整 Agent，自主行动、静默任务与有分寸的联系", _VERSION
-)
+@register(_PLUGIN_NAME, "Neri0721", "周期后台活动，独立门控决策与按需表达", _VERSION)
 class HeartbeatPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -33,7 +32,13 @@ class HeartbeatPlugin(Star):
         self.state = self.store.load()
         self.rules = RuleBook(self.data_dir, self.config)
         self.settings = self._read_settings()
-        self.agent = FullAgent(context, self.state, self._refresh_settings, self._persist)
+        self.agent = FullAgent(
+            context,
+            self.state,
+            self._refresh_settings,
+            self._persist,
+            journal=DecisionJournal(self.data_dir),
+        )
         self._run_lock = asyncio.Lock()
         self._schedule_lock = asyncio.Lock()
         self._config_lock = asyncio.Lock()
@@ -171,6 +176,14 @@ class HeartbeatPlugin(Star):
             "previous_agent_summary": session.last_summary,
             "recent_successful_contacts": session.contacts[-8:],
             "consecutive_unanswered_contacts": session.unanswered,
+            "social_guidance_not_hard_limits": {
+                "usual_contact_gap_minutes": settings.contact_cooldown_minutes,
+                "recent_interaction_minutes": settings.interaction_threshold_minutes
+                if settings.check_last_interaction
+                else None,
+                "unanswered_first_wait_hours": settings.unanswered_backoff_hours,
+                "last_contact_at": session.last_contact_at or None,
+            },
             "task_notes_agent_reported": session.notes,
             "contact_restriction_now": contact_block(
                 session, settings, now, started_user_at=session.last_user_at
@@ -332,6 +345,7 @@ class HeartbeatPlugin(Star):
         host_block = (await self.agent.access(umo))[0] if enabled else "session_disabled"
         yield event.plain_result(
             f"Heartbeat v{_VERSION}\n"
+            f"执行方式：{self.settings.execution_mode}；门控：{self.settings.gate_provider_id or '未指定'}；表达：{self.settings.expression_provider_id or '跟随会话'}\n"
             f"会话 ID：{umo}\n"
             f"当前会话：{'已开启' if enabled else '未开启'}；全局：{'暂停' if self.state.paused else '运行'}；模式 {self.settings.target_mode}\n"
             f"后台条件：{background_block or '已到期'}\n"
@@ -340,6 +354,8 @@ class HeartbeatPlugin(Star):
             f"今日 Agent 轮次：{count}/{self.settings.max_daily_heartbeats}；配置开启会话 {len(self.settings.enabled_sessions)}\n"
             f"联系限制：{blocked or '可由 Agent 判断'}；连续未回应 {session.unanswered} 次\n"
             f"上轮：{session.last_outcome or '尚未运行'}\n规则：{source}\n"
+            f"决策 ID：{session.last_decision_id or '无'}\n"
+            f"决策目录：{self.agent.journal.session_path(umo)}\n"
             f"会话规则路径：{self.rules.session_path(event.unified_msg_origin)}"
         )
 
@@ -418,7 +434,7 @@ class HeartbeatPlugin(Star):
 
     @filter.command("heartbeat_test")
     async def cmd_test(self, event: AstrMessageEvent):
-        """在当前会话立即尝试完整 Agent；仍遵守暂停、预算与联系限制。"""
+        """在当前会话立即尝试所选后台模式；仍遵守暂停、预算与联系限制。"""
         if await self._current(event) is None:
             yield event.plain_result(
                 "当前会话不可测试；群聊需先在配置中允许，并由 AstrBot 管理员操作。"
@@ -429,7 +445,7 @@ class HeartbeatPlugin(Star):
                 "当前会话未开启；请先使用 /heartbeat_enable。手动测试不会自动开启。"
             )
             return
-        yield event.plain_result("正在尝试一次后台活动；近期聊天可能使它只做静默任务。")
+        yield event.plain_result("正在尝试一次后台活动；会调用配置的模型并可能发送消息。")
         outcome = await self._run_one(event.unified_msg_origin, manual=True)
         yield event.plain_result(f"后台活动结果：{outcome}")
 
@@ -449,7 +465,7 @@ class HeartbeatPlugin(Star):
             f"Heartbeat v{_VERSION}\n"
             "/heartbeat_status — 当前会话状态\n"
             "/heartbeat_show — 实际生效的规则\n"
-            "/heartbeat_test — 尝试一次完整 Agent\n"
+            "/heartbeat_test — 尝试一次所选后台模式\n"
             "/heartbeat_enable / heartbeat_disable — 开启/关闭当前会话并保存配置\n"
             "/heartbeat_resume / heartbeat_pause — 上述命令的兼容别名\n"
             "/heartbeat_quiet [分钟] — 只暂停主动联系，0 解除\n"
